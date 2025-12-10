@@ -1,1 +1,7 @@
+# Rust
 /target
+
+# Devenv
+.devenv/
+.devenv.flake.nix
+.direnv/
