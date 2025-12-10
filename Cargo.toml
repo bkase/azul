@@ -1,0 +1,10 @@
+[package]
+name = "azul"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rand = "0.9"
+
+[dev-dependencies]
+rand = "0.9"
