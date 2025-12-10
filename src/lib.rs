@@ -78,15 +78,45 @@ pub enum Phase {
 /// This is the fixed Latin-square pattern on the colored side of the player board.
 pub const WALL_PATTERN: [[Color; BOARD_SIZE]; BOARD_SIZE] = [
     // row 0
-    [Color::Blue, Color::Yellow, Color::Red, Color::Black, Color::Teal],
+    [
+        Color::Blue,
+        Color::Yellow,
+        Color::Red,
+        Color::Black,
+        Color::Teal,
+    ],
     // row 1
-    [Color::Teal, Color::Blue, Color::Yellow, Color::Red, Color::Black],
+    [
+        Color::Teal,
+        Color::Blue,
+        Color::Yellow,
+        Color::Red,
+        Color::Black,
+    ],
     // row 2
-    [Color::Black, Color::Teal, Color::Blue, Color::Yellow, Color::Red],
+    [
+        Color::Black,
+        Color::Teal,
+        Color::Blue,
+        Color::Yellow,
+        Color::Red,
+    ],
     // row 3
-    [Color::Red, Color::Black, Color::Teal, Color::Blue, Color::Yellow],
+    [
+        Color::Red,
+        Color::Black,
+        Color::Teal,
+        Color::Blue,
+        Color::Yellow,
+    ],
     // row 4
-    [Color::Yellow, Color::Red, Color::Black, Color::Teal, Color::Blue],
+    [
+        Color::Yellow,
+        Color::Red,
+        Color::Black,
+        Color::Teal,
+        Color::Blue,
+    ],
 ];
 
 /// Destination column lookup: WALL_DEST_COL[row][color_index] => col
@@ -190,19 +220,10 @@ impl Default for TileSupply {
 // =============================================================================
 
 /// A single pattern line (one of 5 rows, capacities 1-5)
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct PatternLine {
     pub color: Option<Color>, // None => empty; Some(c) => all tiles are c
     pub count: u8,            // 0..=capacity(row_index)
-}
-
-impl Default for PatternLine {
-    fn default() -> Self {
-        PatternLine {
-            color: None,
-            count: 0,
-        }
-    }
 }
 
 /// Wall: 5x5 grid, each cell either empty (None) or occupied by a color
@@ -251,8 +272,8 @@ impl Default for PlayerState {
 /// Complete game state - fully Markov (no history needed)
 #[derive(Clone, Debug)]
 pub struct GameState {
-    pub num_players: u8,                        // 2..=4
-    pub players: [PlayerState; MAX_PLAYERS],    // only 0..num_players used
+    pub num_players: u8,                     // 2..=4
+    pub players: [PlayerState; MAX_PLAYERS], // only 0..num_players used
 
     pub factories: Factories,
     pub center: CenterPool,
@@ -343,7 +364,7 @@ fn num_factories_for_players(num_players: u8) -> u8 {
         2 => 5,
         3 => 7,
         4 => 9,
-        _ => panic!("Invalid number of players: {}", num_players),
+        _ => panic!("Invalid number of players: {num_players}"),
     }
 }
 
@@ -381,12 +402,8 @@ fn draw_tile(supply: &mut TileSupply, rng: &mut impl Rng) -> Option<Color> {
 }
 
 /// Initialize a new game with 2-4 players
-pub fn new_game(
-    num_players: u8,
-    starting_player: PlayerIdx,
-    rng: &mut impl Rng,
-) -> GameState {
-    assert!(num_players >= 2 && num_players <= 4, "Must have 2-4 players");
+pub fn new_game(num_players: u8, starting_player: PlayerIdx, rng: &mut impl Rng) -> GameState {
+    assert!((2..=4).contains(&num_players), "Must have 2-4 players");
     assert!(starting_player < num_players, "Invalid starting player");
 
     let mut state = GameState {
@@ -600,9 +617,10 @@ fn score_placement(wall: &Wall, row: usize, col: usize) -> i16 {
 fn apply_final_scoring(state: &mut GameState) -> [i16; MAX_PLAYERS] {
     let mut scores = [0i16; MAX_PLAYERS];
 
-    for p in 0..state.num_players as usize {
-        let player = &mut state.players[p];
-
+    for (player, score) in state.players[..state.num_players as usize]
+        .iter_mut()
+        .zip(scores[..state.num_players as usize].iter_mut())
+    {
         // +2 per complete horizontal row
         for row in 0..BOARD_SIZE {
             let complete = (0..BOARD_SIZE).all(|col| player.wall[row][col].is_some());
@@ -634,7 +652,7 @@ fn apply_final_scoring(state: &mut GameState) -> [i16; MAX_PLAYERS] {
             }
         }
 
-        scores[p] = player.score;
+        *score = player.score;
     }
 
     scores
@@ -654,15 +672,12 @@ fn refill_factories(supply: &mut TileSupply, factories: &mut Factories, rng: &mu
 }
 
 /// Resolve end of round (wall tiling, scoring, prepare next round or end game)
-fn resolve_end_of_round(
-    state: &mut GameState,
-    rng: &mut impl Rng,
-) -> Option<[i16; MAX_PLAYERS]> {
+fn resolve_end_of_round(state: &mut GameState, rng: &mut impl Rng) -> Option<[i16; MAX_PLAYERS]> {
     // Step 1: Wall tiling and placement scoring for each player
     for p in 0..state.num_players as usize {
         let player = &mut state.players[p];
 
-        for r in 0..BOARD_SIZE {
+        for (r, dest_cols) in WALL_DEST_COL.iter().enumerate() {
             let cap = (r + 1) as u8;
             let line = &player.pattern_lines[r];
 
@@ -670,7 +685,7 @@ fn resolve_end_of_round(
                 let color = line.color.expect("complete line must have color");
 
                 // Find destination column
-                let col = WALL_DEST_COL[r][color as usize] as usize;
+                let col = dest_cols[color as usize] as usize;
 
                 // Place tile on wall
                 debug_assert!(player.wall[r][col].is_none());
@@ -704,15 +719,18 @@ fn resolve_end_of_round(
         let player = &mut state.players[p];
         let mut fp_marker_here = false;
 
-        for i in 0..player.floor.len as usize {
-            match player.floor.slots[i] {
+        for (slot, &penalty) in player.floor.slots[..player.floor.len as usize]
+            .iter()
+            .zip(FLOOR_PENALTY.iter())
+        {
+            match *slot {
                 Token::Tile(color) => {
-                    let penalty = FLOOR_PENALTY[i] as i16;
+                    let penalty = penalty as i16;
                     player.score = (player.score + penalty).max(0);
                     state.supply.discard[color as usize] += 1;
                 }
                 Token::FirstPlayerMarker => {
-                    let penalty = FLOOR_PENALTY[i] as i16;
+                    let penalty = penalty as i16;
                     player.score = (player.score + penalty).max(0);
                     fp_marker_here = true;
                 }
@@ -880,11 +898,11 @@ pub fn apply_action(
     }
 
     // Step 3: Check if round ended (all factories empty and center has no tiles)
-    let all_factories_empty = (0..state.factories.num_factories as usize)
-        .all(|f| state.factories.factories[f].len == 0);
+    let all_factories_empty =
+        (0..state.factories.num_factories as usize).all(|f| state.factories.factories[f].len == 0);
 
-    let center_has_tiles = (0..state.center.len as usize)
-        .any(|i| matches!(state.center.items[i], Token::Tile(_)));
+    let center_has_tiles =
+        (0..state.center.len as usize).any(|i| matches!(state.center.items[i], Token::Tile(_)));
 
     if all_factories_empty && !center_has_tiles {
         // End of round
@@ -895,7 +913,8 @@ pub fn apply_action(
         })
     } else {
         // Advance to next player
-        state.current_player = ((state.current_player as usize + 1) % state.num_players as usize) as u8;
+        state.current_player =
+            ((state.current_player as usize + 1) % state.num_players as usize) as u8;
         Ok(StepResult {
             state,
             final_scores: None,
@@ -970,8 +989,7 @@ pub fn assert_tile_invariants(state: &GameState) {
 
         assert_eq!(
             total, TILES_PER_COLOR,
-            "Tile count invariant violated for {:?}: expected {}, got {}",
-            color, TILES_PER_COLOR, total
+            "Tile count invariant violated for {color:?}: expected {TILES_PER_COLOR}, got {total}"
         );
     }
 }
@@ -979,8 +997,8 @@ pub fn assert_tile_invariants(state: &GameState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     // =========================================================================
     // Basic game state tests
@@ -1129,11 +1147,9 @@ mod tests {
                 for col in 0..BOARD_SIZE {
                     if let Some(color) = state.players[p].wall[row][col] {
                         assert_eq!(
-                            color,
-                            WALL_PATTERN[row][col],
+                            color, WALL_PATTERN[row][col],
                             "Wall color at ({},{}) doesn't match pattern",
-                            row,
-                            col
+                            row, col
                         );
                     }
                 }
@@ -1355,7 +1371,7 @@ mod tests {
 
         // Create supply with few tiles in bag, rest in discard
         let mut supply = TileSupply {
-            bag: [2, 2, 2, 2, 2], // 10 tiles total in bag
+            bag: [2, 2, 2, 2, 2],          // 10 tiles total in bag
             discard: [18, 18, 18, 18, 18], // 90 tiles in discard
         };
 
@@ -1365,10 +1381,11 @@ mod tests {
         refill_factories(&mut supply, &mut factories, &mut rng);
 
         // Should have refilled from discard
-        let total_in_factories: u8 = (0..5)
-            .map(|f| factories.factories[f].len)
-            .sum();
-        assert_eq!(total_in_factories, 20, "Should have filled 5 factories with 4 tiles each");
+        let total_in_factories: u8 = (0..5).map(|f| factories.factories[f].len).sum();
+        assert_eq!(
+            total_in_factories, 20,
+            "Should have filled 5 factories with 4 tiles each"
+        );
 
         // Verify tile count invariant
         let bag_total: u8 = supply.bag.iter().sum();
@@ -1391,10 +1408,11 @@ mod tests {
 
         refill_factories(&mut supply, &mut factories, &mut rng);
 
-        let total_in_factories: u8 = (0..5)
-            .map(|f| factories.factories[f].len)
-            .sum();
-        assert_eq!(total_in_factories, 3, "Should only have 3 tiles in factories");
+        let total_in_factories: u8 = (0..5).map(|f| factories.factories[f].len).sum();
+        assert_eq!(
+            total_in_factories, 3,
+            "Should only have 3 tiles in factories"
+        );
     }
 
     // =========================================================================
@@ -1407,7 +1425,10 @@ mod tests {
         let state = new_game(2, 0, &mut rng);
 
         let actions = legal_actions(&state);
-        assert!(!actions.is_empty(), "Should have legal actions at game start");
+        assert!(
+            !actions.is_empty(),
+            "Should have legal actions at game start"
+        );
     }
 
     #[test]
@@ -1424,7 +1445,10 @@ mod tests {
         for action in &actions {
             if action.color == Color::Blue {
                 if let DraftDestination::PatternLine(row) = action.dest {
-                    assert_ne!(row, 0, "Should not allow Blue in pattern line 0 when already in wall row 0");
+                    assert_ne!(
+                        row, 0,
+                        "Should not allow Blue in pattern line 0 when already in wall row 0"
+                    );
                 }
             }
         }
@@ -1444,7 +1468,11 @@ mod tests {
         // Only Red should be allowed in pattern line 2
         for action in &actions {
             if let DraftDestination::PatternLine(2) = action.dest {
-                assert_eq!(action.color, Color::Red, "Only Red should be allowed in pattern line with Red");
+                assert_eq!(
+                    action.color,
+                    Color::Red,
+                    "Only Red should be allowed in pattern line with Red"
+                );
             }
         }
     }
@@ -1480,7 +1508,10 @@ mod tests {
             .iter()
             .filter(|a| matches!(a.dest, DraftDestination::Floor))
             .collect();
-        assert!(!floor_actions.is_empty(), "Floor should always be an available destination");
+        assert!(
+            !floor_actions.is_empty(),
+            "Floor should always be an available destination"
+        );
     }
 
     // =========================================================================
@@ -1517,12 +1548,22 @@ mod tests {
         // First player marker should no longer be in center
         let marker_in_center = (0..result.state.center.len as usize)
             .any(|i| matches!(result.state.center.items[i], Token::FirstPlayerMarker));
-        assert!(!marker_in_center, "First player marker should be taken from center");
+        assert!(
+            !marker_in_center,
+            "First player marker should be taken from center"
+        );
 
         // Should be on player 0's floor
-        let marker_on_floor = (0..result.state.players[0].floor.len as usize)
-            .any(|i| matches!(result.state.players[0].floor.slots[i], Token::FirstPlayerMarker));
-        assert!(marker_on_floor, "First player marker should be on player's floor");
+        let marker_on_floor = (0..result.state.players[0].floor.len as usize).any(|i| {
+            matches!(
+                result.state.players[0].floor.slots[i],
+                Token::FirstPlayerMarker
+            )
+        });
+        assert!(
+            marker_on_floor,
+            "First player marker should be on player's floor"
+        );
     }
 
     #[test]
