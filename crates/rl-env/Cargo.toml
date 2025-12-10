@@ -1,0 +1,12 @@
+[package]
+name = "azul-rl-env"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+azul-engine = { path = "../engine" }
+rand = "0.9"
+mlx-rs = "0.25"
+
+[dev-dependencies]
+rand = "0.9"

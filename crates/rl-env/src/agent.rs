@@ -3,7 +3,7 @@
 use rand::Rng;
 
 use super::{ActionId, Observation};
-use crate::PlayerIdx;
+use azul_engine::PlayerIdx;
 
 /// Inputs provided to an agent when selecting an action
 pub struct AgentInput<'a> {
@@ -67,7 +67,7 @@ impl Agent for RandomAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rl_env::{AzulEnv, BasicFeatureExtractor, EnvConfig, Environment};
+    use crate::{AzulEnv, BasicFeatureExtractor, EnvConfig, Environment};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 

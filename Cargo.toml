@@ -1,9 +1,15 @@
+[workspace]
+members = ["crates/engine", "crates/rl-env"]
+resolver = "2"
+
 [package]
 name = "azul"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+azul-engine = { path = "crates/engine" }
+azul-rl-env = { path = "crates/rl-env" }
 rand = "0.9"
 mlx-rs = "0.25"
 

@@ -3,7 +3,7 @@
 //! Converts full game state into fixed-length array observation
 //! from the perspective of a given player.
 
-use crate::{
+use azul_engine::{
     GameState, PlayerIdx, Token, ALL_COLORS, BOARD_SIZE, FLOOR_CAPACITY, MAX_FACTORIES,
     MAX_PLAYERS, TILE_COLORS,
 };
@@ -250,8 +250,8 @@ impl FeatureExtractor for BasicFeatureExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::new_game;
-    use crate::rl_env::ObservationExt;
+    use azul_engine::new_game;
+    use crate::ObservationExt;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
@@ -297,7 +297,7 @@ mod tests {
 
         // At game start, both players have identical boards, so observations would be the same
         // except for the player rotation. Let's modify one player's board to make them different.
-        state.players[0].pattern_lines[0].color = Some(crate::Color::Blue);
+        state.players[0].pattern_lines[0].color = Some(azul_engine::Color::Blue);
         state.players[0].pattern_lines[0].count = 1;
 
         let obs0 = extractor.encode(&state, 0);

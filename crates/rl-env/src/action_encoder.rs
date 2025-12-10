@@ -3,7 +3,7 @@
 //! Fixed global action space of size 300, covering all syntactically possible
 //! Azul draft moves regardless of current legality.
 
-use crate::{Action, Color, DraftDestination, DraftSource, BOARD_SIZE, MAX_FACTORIES, TILE_COLORS};
+use azul_engine::{Action, Color, DraftDestination, DraftSource, BOARD_SIZE, MAX_FACTORIES, TILE_COLORS};
 
 use super::ActionId;
 
@@ -115,6 +115,7 @@ impl ActionEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use azul_engine::ALL_COLORS;
 
     #[test]
     fn test_action_space_size_calculation() {
@@ -158,7 +159,7 @@ mod tests {
     #[test]
     fn test_round_trip_all_factories() {
         for f in 0..MAX_FACTORIES as u8 {
-            for color in crate::ALL_COLORS {
+            for color in ALL_COLORS {
                 for row in 0..BOARD_SIZE as u8 {
                     let action = Action {
                         source: DraftSource::Factory(f),
@@ -189,7 +190,7 @@ mod tests {
 
     #[test]
     fn test_round_trip_center() {
-        for color in crate::ALL_COLORS {
+        for color in ALL_COLORS {
             for row in 0..BOARD_SIZE as u8 {
                 let action = Action {
                     source: DraftSource::Center,

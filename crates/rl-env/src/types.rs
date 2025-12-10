@@ -1,6 +1,6 @@
 //! Core RL types for the Azul environment
 
-use crate::{GameState, PlayerIdx, MAX_PLAYERS};
+use azul_engine::{GameState, PlayerIdx, MAX_PLAYERS};
 
 /// Discrete action identifier (0..ACTION_SPACE_SIZE-1)
 pub type ActionId = u16;

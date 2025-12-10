@@ -21,6 +21,24 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 name = "azul"
 version = "0.1.0"
 dependencies = [
+ "azul-engine",
+ "azul-rl-env",
+ "mlx-rs",
+ "rand",
+]
+
+[[package]]
+name = "azul-engine"
+version = "0.1.0"
+dependencies = [
+ "rand",
+]
+
+[[package]]
+name = "azul-rl-env"
+version = "0.1.0"
+dependencies = [
+ "azul-engine",
  "mlx-rs",
  "rand",
 ]

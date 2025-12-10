@@ -1,6 +1,6 @@
 //! RL Environment trait and AzulEnv implementation
 
-use crate::{apply_action, legal_actions, new_game, GameState, Phase, MAX_PLAYERS};
+use azul_engine::{apply_action, legal_actions, new_game, GameState, Phase, MAX_PLAYERS};
 use rand::Rng;
 
 use super::{
@@ -286,7 +286,7 @@ pub fn self_play_episode<F: FeatureExtractor, A: super::Agent>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rl_env::{Agent, BasicFeatureExtractor, ObservationExt};
+    use crate::{Agent, BasicFeatureExtractor, ObservationExt};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
@@ -425,7 +425,7 @@ mod tests {
 
         // Run 5 episodes
         for _ in 0..5 {
-            let mut cum_rewards = [0.0f32; crate::MAX_PLAYERS];
+            let mut cum_rewards = [0.0f32; azul_engine::MAX_PLAYERS];
             let mut step = env.reset(&mut rng);
 
             while !step.done {
@@ -555,7 +555,7 @@ mod tests {
         let mut env_rng1 = StdRng::seed_from_u64(42); // RNG for env
 
         let mut actions_taken: Vec<ActionId> = Vec::new();
-        let mut rewards_1: Vec<[f32; crate::MAX_PLAYERS]> = Vec::new();
+        let mut rewards_1: Vec<[f32; azul_engine::MAX_PLAYERS]> = Vec::new();
         let mut observations_1: Vec<Vec<f32>> = Vec::new();
 
         let mut step1 = env1.reset(&mut env_rng1);
