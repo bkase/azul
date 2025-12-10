@@ -18,6 +18,17 @@ pub struct AgentInput<'a> {
     pub current_player: PlayerIdx,
 }
 
+impl AgentInput<'_> {
+    /// Returns an iterator over legal action IDs
+    pub fn legal_action_ids(&self) -> impl Iterator<Item = ActionId> + '_ {
+        self.legal_action_mask
+            .iter()
+            .enumerate()
+            .filter(|(_, &legal)| legal)
+            .map(|(id, _)| id as ActionId)
+    }
+}
+
 /// Trait for anything that can choose actions in the environment:
 /// random policy, neural-net-based policy, or human input.
 pub trait Agent {
@@ -41,13 +52,7 @@ impl RandomAgent {
 
 impl Agent for RandomAgent {
     fn select_action(&mut self, input: &AgentInput, rng: &mut impl Rng) -> ActionId {
-        let legal_ids: Vec<ActionId> = input
-            .legal_action_mask
-            .iter()
-            .enumerate()
-            .filter(|(_, &legal)| legal)
-            .map(|(id, _)| id as ActionId)
-            .collect();
+        let legal_ids: Vec<ActionId> = input.legal_action_ids().collect();
 
         assert!(
             !legal_ids.is_empty(),

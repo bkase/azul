@@ -161,11 +161,13 @@ impl<F: FeatureExtractor> Environment for AzulEnv<F> {
         let action = ActionEncoder::decode(action_id);
 
         // 5. Record previous scores
-        let mut prev_scores = [0i16; MAX_PLAYERS];
-        #[allow(clippy::needless_range_loop)]
-        for p in 0..self.game_state.num_players as usize {
-            prev_scores[p] = self.game_state.players[p].score;
-        }
+        let prev_scores: [i16; MAX_PLAYERS] = std::array::from_fn(|p| {
+            if p < self.game_state.num_players as usize {
+                self.game_state.players[p].score
+            } else {
+                0
+            }
+        });
 
         // 6. Apply action via engine
         let apply_result = apply_action(self.game_state.clone(), action, rng)
@@ -284,7 +286,7 @@ pub fn self_play_episode<F: FeatureExtractor, A: super::Agent>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rl_env::{Agent, BasicFeatureExtractor};
+    use crate::rl_env::{Agent, BasicFeatureExtractor, ObservationExt};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
@@ -557,7 +559,7 @@ mod tests {
         let mut observations_1: Vec<Vec<f32>> = Vec::new();
 
         let mut step1 = env1.reset(&mut env_rng1);
-        observations_1.push(step1.observations[0].as_slice().to_vec());
+        observations_1.push(step1.observations[0].as_f32_slice().to_vec());
 
         while !step1.done {
             let p = step1.current_player as usize;
@@ -574,7 +576,7 @@ mod tests {
                 .step(action_id, &mut env_rng1)
                 .expect("step should succeed");
             rewards_1.push(next.rewards);
-            observations_1.push(next.observations[0].as_slice().to_vec());
+            observations_1.push(next.observations[0].as_f32_slice().to_vec());
             step1 = next;
         }
 
@@ -587,7 +589,7 @@ mod tests {
 
         // Verify initial observation matches
         assert_eq!(
-            step2_init.observations[0].as_slice().to_vec(),
+            step2_init.observations[0].as_f32_slice().to_vec(),
             observations_1[0],
             "Initial observations should match"
         );
@@ -607,7 +609,7 @@ mod tests {
 
             // Verify observations match
             assert_eq!(
-                next.observations[0].as_slice().to_vec(),
+                next.observations[0].as_f32_slice().to_vec(),
                 observations_1[idx + 1],
                 "Observations should be deterministic at step {}",
                 idx

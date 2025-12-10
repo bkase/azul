@@ -8,14 +8,14 @@ use crate::{
     MAX_PLAYERS, TILE_COLORS,
 };
 
-use super::{Array, Observation};
+use super::Observation;
 
 /// Converts a full GameState into a fixed-length array observation
 /// from the perspective of a given player.
 pub trait FeatureExtractor: Clone {
     /// Returns the length of the flattened observation vector.
     ///
-    /// For all states and players, encode(...) must return an Array
+    /// For all states and players, encode(...) must return an Observation
     /// with shape [obs_size].
     fn obs_size(&self) -> usize;
 
@@ -30,7 +30,7 @@ pub trait FeatureExtractor: Clone {
 
 /// Create a zero-filled observation of the given size
 pub fn create_zero_observation(obs_size: usize) -> Observation {
-    Array::zeros(&[obs_size as i32]).expect("Failed to create zero observation")
+    mlx_rs::Array::zeros::<f32>(&[obs_size as i32]).expect("Failed to create zero observation")
 }
 
 /// Basic feature extractor implementation
@@ -243,7 +243,7 @@ impl FeatureExtractor for BasicFeatureExtractor {
 
         debug_assert_eq!(idx, obs_size, "Feature count mismatch");
 
-        Array::from_slice(&features, &[obs_size as i32])
+        mlx_rs::Array::from_slice(&features, &[obs_size as i32])
     }
 }
 
@@ -251,6 +251,7 @@ impl FeatureExtractor for BasicFeatureExtractor {
 mod tests {
     use super::*;
     use crate::new_game;
+    use crate::rl_env::ObservationExt;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
@@ -282,8 +283,8 @@ mod tests {
         let obs2 = extractor.encode(&state, 0);
 
         // Convert to vectors for comparison
-        let data1: Vec<f32> = obs1.as_slice().to_vec();
-        let data2: Vec<f32> = obs2.as_slice().to_vec();
+        let data1: Vec<f32> = obs1.as_f32_slice().to_vec();
+        let data2: Vec<f32> = obs2.as_f32_slice().to_vec();
 
         assert_eq!(data1, data2, "Encoding should be deterministic");
     }
@@ -302,8 +303,8 @@ mod tests {
         let obs0 = extractor.encode(&state, 0);
         let obs1 = extractor.encode(&state, 1);
 
-        let data0: Vec<f32> = obs0.as_slice().to_vec();
-        let data1: Vec<f32> = obs1.as_slice().to_vec();
+        let data0: Vec<f32> = obs0.as_f32_slice().to_vec();
+        let data1: Vec<f32> = obs1.as_f32_slice().to_vec();
 
         // Observations should differ because:
         // 1. Player 0 sees their own board (with the Blue tile) first
@@ -319,7 +320,7 @@ mod tests {
         let obs = create_zero_observation(100);
         assert_eq!(obs.shape(), &[100]);
 
-        let data: Vec<f32> = obs.as_slice().to_vec();
+        let data: Vec<f32> = obs.as_f32_slice().to_vec();
         assert!(data.iter().all(|&x| x == 0.0));
     }
 }

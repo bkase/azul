@@ -3,13 +3,9 @@ name = "azul"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-default = []
-mlx = ["dep:mlx-rs"]
-
 [dependencies]
 rand = "0.9"
-mlx-rs = { version = "0.25", optional = true }
+mlx-rs = "0.25"
 
 [dev-dependencies]
 rand = "0.9"

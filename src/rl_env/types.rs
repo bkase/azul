@@ -8,69 +8,19 @@ pub type ActionId = u16;
 /// Reward value (float)
 pub type Reward = f32;
 
-/// Simple array type for observations when MLX is not available.
-/// This mimics the MLX Array API for compatibility.
-#[derive(Clone, Debug)]
-pub struct SimpleArray {
-    data: Vec<f32>,
-    shape: Vec<i32>,
-}
-
-impl SimpleArray {
-    /// Create a new array from a slice with the given shape
-    pub fn from_slice(data: &[f32], shape: &[i32]) -> Self {
-        let expected_len: i32 = shape.iter().product();
-        assert_eq!(
-            data.len(),
-            expected_len as usize,
-            "Data length {} doesn't match shape {:?}",
-            data.len(),
-            shape
-        );
-        Self {
-            data: data.to_vec(),
-            shape: shape.to_vec(),
-        }
-    }
-
-    /// Create a zero-filled array with the given shape
-    pub fn zeros(shape: &[i32]) -> Result<Self, &'static str> {
-        let len: i32 = shape.iter().product();
-        Ok(Self {
-            data: vec![0.0; len as usize],
-            shape: shape.to_vec(),
-        })
-    }
-
-    /// Get the shape of the array
-    pub fn shape(&self) -> &[i32] {
-        &self.shape
-    }
-
-    /// Get the data as a slice
-    pub fn as_slice(&self) -> &[f32] {
-        &self.data
-    }
-
-    /// Get the number of dimensions
-    pub fn ndim(&self) -> usize {
-        self.shape.len()
-    }
-}
-
-/// Observation as array of dtype f32 and shape [obs_size]
-#[cfg(feature = "mlx")]
+/// Observation as MLX array of dtype f32 and shape [obs_size]
 pub type Observation = mlx_rs::Array;
 
-#[cfg(not(feature = "mlx"))]
-pub type Observation = SimpleArray;
+/// Helper trait to get f32 slice from observation arrays
+pub trait ObservationExt {
+    fn as_f32_slice(&self) -> &[f32];
+}
 
-/// Alias for the array type being used
-#[cfg(feature = "mlx")]
-pub type Array = mlx_rs::Array;
-
-#[cfg(not(feature = "mlx"))]
-pub type Array = SimpleArray;
+impl ObservationExt for Observation {
+    fn as_f32_slice(&self) -> &[f32] {
+        self.as_slice::<f32>()
+    }
+}
 
 /// Reward schemes supported by the environment
 #[derive(Copy, Clone, Debug, Default)]
