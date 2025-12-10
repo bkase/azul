@@ -3,7 +3,7 @@
 use rand::Rng;
 
 use super::{ActionId, Observation};
-use azul_engine::PlayerIdx;
+use azul_engine::{GameState, PlayerIdx};
 
 /// Inputs provided to an agent when selecting an action
 pub struct AgentInput<'a> {
@@ -16,6 +16,11 @@ pub struct AgentInput<'a> {
 
     /// Index of the player whose turn it is
     pub current_player: PlayerIdx,
+
+    /// Optional full engine state at this decision point.
+    /// - For MCTS-based agents, this must be Some(&GameState).
+    /// - For simple agents (RandomAgent), it may be None.
+    pub state: Option<&'a GameState>,
 }
 
 impl AgentInput<'_> {
@@ -85,6 +90,7 @@ mod tests {
             observation: &step.observations[step.current_player as usize],
             legal_action_mask: &step.legal_action_mask,
             current_player: step.current_player,
+            state: None,
         };
 
         let action = agent.select_action(&input, &mut rng);
@@ -110,6 +116,7 @@ mod tests {
             observation: &step.observations[step.current_player as usize],
             legal_action_mask: &step.legal_action_mask,
             current_player: step.current_player,
+            state: None,
         };
 
         // Select many times and verify all are legal

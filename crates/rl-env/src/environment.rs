@@ -259,6 +259,7 @@ pub fn self_play_episode<F: FeatureExtractor, A: super::Agent>(
             observation: &step.observations[p],
             legal_action_mask: &step.legal_action_mask,
             current_player: step.current_player,
+            state: step.state.as_ref(),
         };
 
         // 3. Select action
@@ -434,6 +435,7 @@ mod tests {
                     observation: &step.observations[p],
                     legal_action_mask: &step.legal_action_mask,
                     current_player: step.current_player,
+                    state: None,
                 };
 
                 let action_id = agent.select_action(&input, &mut rng);
@@ -486,6 +488,7 @@ mod tests {
                     observation: &step.observations[p],
                     legal_action_mask: &step.legal_action_mask,
                     current_player: step.current_player,
+                    state: None,
                 };
 
                 let action_id = agent.select_action(&input, &mut rng);
@@ -567,6 +570,7 @@ mod tests {
                 observation: &step1.observations[p],
                 legal_action_mask: &step1.legal_action_mask,
                 current_player: step1.current_player,
+                state: None,
             };
 
             let action_id = agent1.select_action(&input, &mut agent_rng1);
@@ -667,6 +671,7 @@ mod tests {
                     observation: &step.observations[p],
                     legal_action_mask: &step.legal_action_mask,
                     current_player: step.current_player,
+                    state: None,
                 };
 
                 let action_id = agent.select_action(&input, &mut rng);
