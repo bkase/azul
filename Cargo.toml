@@ -10,6 +10,7 @@ edition = "2021"
 [dependencies]
 azul-engine = { path = "crates/engine" }
 azul-rl-env = { path = "crates/rl-env" }
+clap = { version = "4", features = ["derive"] }
 rand = "0.9"
 mlx-rs = "0.25"
 

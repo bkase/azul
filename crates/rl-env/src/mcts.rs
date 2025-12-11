@@ -11,21 +11,9 @@ use mlx_rs::Array;
 use rand::Rng;
 use rand_distr::{Distribution, Gamma};
 
-use crate::{ActionEncoder, ActionId, Agent, AgentInput, FeatureExtractor, Observation, ACTION_SPACE_SIZE};
-
-/// Training example for AlphaZero self-play.
-/// Represents a single (s, π, z) tuple in AlphaZero notation.
-#[derive(Clone)]
-pub struct TrainingExample {
-    /// Observation from the acting player's perspective
-    pub observation: Observation,
-
-    /// MCTS-improved policy distribution over ACTION_SPACE_SIZE
-    pub policy: Vec<f32>,
-
-    /// Final outcome from player's perspective (typically in [-1, 1])
-    pub value: f32,
-}
+use crate::{
+    ActionEncoder, ActionId, Agent, AgentInput, FeatureExtractor, Observation, ACTION_SPACE_SIZE,
+};
 
 /// Batch of training examples for neural network training.
 /// Arrays are stacked for efficient batch processing.
@@ -107,9 +95,9 @@ pub type NodeIdx = u32;
 #[derive(Clone, Debug)]
 pub struct ChildEdge {
     pub action_id: ActionId,
-    pub prior: f32,         // P(s, a)
-    pub visit_count: u32,   // N(s, a)
-    pub value_sum: f32,     // W(s, a), sum of backed-up values
+    pub prior: f32,             // P(s, a)
+    pub visit_count: u32,       // N(s, a)
+    pub value_sum: f32,         // W(s, a), sum of backed-up values
     pub child: Option<NodeIdx>, // None until first expansion along this edge
 }
 
@@ -117,8 +105,8 @@ pub struct ChildEdge {
 #[derive(Clone, Debug)]
 pub struct Node {
     pub state: GameState,
-    pub to_play: PlayerIdx,      // state.current_player at this node
-    pub is_terminal: bool,       // state.phase == GameOver
+    pub to_play: PlayerIdx, // state.current_player at this node
+    pub is_terminal: bool,  // state.phase == GameOver
 
     /// Edges for all legal actions at this node.
     pub children: Vec<ChildEdge>,
@@ -138,8 +126,6 @@ pub struct MctsTree {
 struct PathStep {
     node_idx: NodeIdx,
     child_idx: usize,
-    #[allow(dead_code)]
-    to_play: PlayerIdx,
 }
 
 /// AlphaZero MCTS Agent that performs tree search guided by a neural network.
@@ -159,12 +145,20 @@ where
     N: PolicyValueNet,
 {
     pub fn new(config: MctsConfig, features: F, net: N) -> Self {
-        Self { config, features, net }
+        Self {
+            config,
+            features,
+            net,
+        }
     }
 
     /// Main MCTS search entrypoint.
     /// Returns improved policy over ACTION_SPACE_SIZE.
-    fn run_search(&mut self, root_state: &GameState, rng: &mut impl Rng) -> [f32; ACTION_SPACE_SIZE] {
+    fn run_search(
+        &mut self,
+        root_state: &GameState,
+        rng: &mut impl Rng,
+    ) -> [f32; ACTION_SPACE_SIZE] {
         // Initialize tree with root node
         let mut tree = MctsTree::default();
 
@@ -172,7 +166,9 @@ where
         let root_idx = self.create_node(&mut tree, root_state.clone(), rng);
 
         // Add Dirichlet noise to root priors
-        if self.config.root_dirichlet_alpha > 0.0 && !tree.nodes[root_idx as usize].children.is_empty() {
+        if self.config.root_dirichlet_alpha > 0.0
+            && !tree.nodes[root_idx as usize].children.is_empty()
+        {
             add_dirichlet_noise(
                 &mut tree.nodes[root_idx as usize].children,
                 self.config.root_dirichlet_alpha,
@@ -197,7 +193,12 @@ where
     }
 
     /// Create a new node in the tree, expanding it with neural network evaluation.
-    fn create_node(&mut self, tree: &mut MctsTree, state: GameState, _rng: &mut impl Rng) -> NodeIdx {
+    fn create_node(
+        &mut self,
+        tree: &mut MctsTree,
+        state: GameState,
+        _rng: &mut impl Rng,
+    ) -> NodeIdx {
         let to_play = state.current_player;
         let is_terminal = state.phase == Phase::GameOver;
 
@@ -286,7 +287,6 @@ where
             path.push(PathStep {
                 node_idx: current_idx,
                 child_idx,
-                to_play: node.to_play,
             });
 
             if let Some(next_idx) = edge.child {
@@ -384,7 +384,10 @@ fn softmax(logits: &[(ActionId, f32)]) -> Vec<(ActionId, f32)> {
         return Vec::new();
     }
 
-    let max_logit = logits.iter().map(|(_, l)| *l).fold(f32::NEG_INFINITY, f32::max);
+    let max_logit = logits
+        .iter()
+        .map(|(_, l)| *l)
+        .fold(f32::NEG_INFINITY, f32::max);
 
     let mut exps: Vec<(ActionId, f32)> = Vec::with_capacity(logits.len());
     let mut sum = 0.0;
@@ -539,6 +542,137 @@ where
     }
 }
 
+impl<F, N> crate::alphazero::training::MctsAgentExt for AlphaZeroMctsAgent<F, N>
+where
+    F: FeatureExtractor,
+    N: PolicyValueNet,
+{
+    fn select_action_and_policy(
+        &mut self,
+        input: &AgentInput,
+        temperature: f32,
+        rng: &mut impl Rng,
+    ) -> crate::alphazero::training::MctsSearchResult {
+        let state = input
+            .state
+            .expect("AlphaZeroMctsAgent requires full GameState in AgentInput.state");
+        assert_eq!(
+            state.num_players, 2,
+            "AlphaZeroMctsAgent v1 only supports 2 players"
+        );
+
+        // Temporarily override temperature for this search
+        let original_temp = self.config.temperature;
+        self.config.temperature = temperature;
+
+        // Run search to get improved policy over ACTION_SPACE_SIZE
+        let pi = self.run_search(state, rng);
+
+        // Restore original temperature
+        self.config.temperature = original_temp;
+
+        // Mask illegal actions using input.legal_action_mask
+        let mut masked_pi = [0.0f32; ACTION_SPACE_SIZE];
+        for (id, &prob) in pi.iter().enumerate() {
+            if id < input.legal_action_mask.len() && input.legal_action_mask[id] {
+                masked_pi[id] = prob;
+            }
+        }
+
+        // Re-normalize
+        let sum: f32 = masked_pi.iter().sum();
+        if sum > 0.0 {
+            for p in &mut masked_pi {
+                *p /= sum;
+            }
+        }
+
+        // Sample according to temperature
+        let action_id = sample_from_policy(&masked_pi, temperature, rng);
+
+        crate::alphazero::training::MctsSearchResult {
+            action: action_id as ActionId,
+            policy: masked_pi.to_vec(),
+        }
+    }
+}
+
+impl<F, N> crate::alphazero::training::TrainableModel for AlphaZeroMctsAgent<F, N>
+where
+    F: FeatureExtractor,
+    N: PolicyValueNet + crate::alphazero::training::TrainableModel,
+{
+    fn param_count(&self) -> usize {
+        crate::alphazero::training::TrainableModel::param_count(&self.net)
+    }
+
+    fn parameters(&self) -> Vec<Array> {
+        crate::alphazero::training::TrainableModel::parameters(&self.net)
+    }
+
+    fn forward(&mut self, obs: &Array) -> (Array, Array) {
+        crate::alphazero::training::TrainableModel::forward(&mut self.net, obs)
+    }
+
+    fn apply_gradients(&mut self, learning_rate: f32, grads: &[Array]) {
+        crate::alphazero::training::TrainableModel::apply_gradients(
+            &mut self.net,
+            learning_rate,
+            grads,
+        )
+    }
+
+    fn eval_parameters(&self) {
+        crate::alphazero::training::TrainableModel::eval_parameters(&self.net)
+    }
+
+    fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        crate::alphazero::training::TrainableModel::save(&self.net, path)
+    }
+
+    fn load(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        crate::alphazero::training::TrainableModel::load(&mut self.net, path)
+    }
+}
+
+impl<F, N> mlx_rs::module::ModuleParameters for AlphaZeroMctsAgent<F, N>
+where
+    F: FeatureExtractor,
+    N: PolicyValueNet + mlx_rs::module::ModuleParameters,
+{
+    fn num_parameters(&self) -> usize {
+        mlx_rs::module::ModuleParameters::num_parameters(&self.net)
+    }
+
+    fn parameters(&self) -> mlx_rs::module::ModuleParamRef<'_> {
+        mlx_rs::module::ModuleParameters::parameters(&self.net)
+    }
+
+    fn parameters_mut(&mut self) -> mlx_rs::module::ModuleParamMut<'_> {
+        mlx_rs::module::ModuleParameters::parameters_mut(&mut self.net)
+    }
+
+    fn trainable_parameters(&self) -> mlx_rs::module::ModuleParamRef<'_> {
+        mlx_rs::module::ModuleParameters::trainable_parameters(&self.net)
+    }
+
+    fn freeze_parameters(&mut self, recursive: bool) {
+        mlx_rs::module::ModuleParameters::freeze_parameters(&mut self.net, recursive)
+    }
+
+    fn unfreeze_parameters(&mut self, recursive: bool) {
+        mlx_rs::module::ModuleParameters::unfreeze_parameters(&mut self.net, recursive)
+    }
+
+    fn all_frozen(&self) -> Option<bool> {
+        mlx_rs::module::ModuleParameters::all_frozen(&self.net)
+    }
+
+    fn any_frozen(&self) -> Option<bool> {
+        mlx_rs::module::ModuleParameters::any_frozen(&self.net)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,12 +692,6 @@ mod tests {
                 priors: [1.0 / ACTION_SPACE_SIZE as f32; ACTION_SPACE_SIZE],
                 value,
             }
-        }
-
-        pub fn peaked_at(action_id: ActionId, value: f32) -> Self {
-            let mut priors = [0.0f32; ACTION_SPACE_SIZE];
-            priors[action_id as usize] = 1.0;
-            Self { priors, value }
         }
     }
 
@@ -796,7 +924,9 @@ mod tests {
 
             let action_id = agent1.select_action(&input, &mut rng1);
             actions1.push(action_id);
-            step1 = env1.step(action_id, &mut rng1).expect("step should succeed");
+            step1 = env1
+                .step(action_id, &mut rng1)
+                .expect("step should succeed");
         }
 
         // Run 2 with same seeds
@@ -823,7 +953,9 @@ mod tests {
 
             let action_id = agent2.select_action(&input, &mut rng2);
             actions2.push(action_id);
-            step2 = env2.step(action_id, &mut rng2).expect("step should succeed");
+            step2 = env2
+                .step(action_id, &mut rng2)
+                .expect("step should succeed");
         }
 
         assert_eq!(

@@ -11,3 +11,4 @@ mlx-rs = "0.25"
 
 [dev-dependencies]
 rand = "0.9"
+

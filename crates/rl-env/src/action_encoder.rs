@@ -3,7 +3,9 @@
 //! Fixed global action space of size 300, covering all syntactically possible
 //! Azul draft moves regardless of current legality.
 
-use azul_engine::{Action, Color, DraftDestination, DraftSource, BOARD_SIZE, MAX_FACTORIES, TILE_COLORS};
+use azul_engine::{
+    Action, Color, DraftDestination, DraftSource, BOARD_SIZE, MAX_FACTORIES, TILE_COLORS,
+};
 
 use super::ActionId;
 

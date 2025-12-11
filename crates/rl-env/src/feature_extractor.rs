@@ -250,8 +250,8 @@ impl FeatureExtractor for BasicFeatureExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use azul_engine::new_game;
     use crate::ObservationExt;
+    use azul_engine::new_game;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
