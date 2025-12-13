@@ -15,6 +15,8 @@ mod alphazero_net;
 mod environment;
 mod feature_extractor;
 mod mcts;
+#[cfg(feature = "profiling")]
+pub mod profiling;
 mod types;
 
 pub use action_encoder::*;

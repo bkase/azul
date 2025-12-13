@@ -3,11 +3,68 @@
 //! Fixed global action space of size 300, covering all syntactically possible
 //! Azul draft moves regardless of current legality.
 
+use std::sync::LazyLock;
+
 use azul_engine::{
     Action, Color, DraftDestination, DraftSource, BOARD_SIZE, MAX_FACTORIES, TILE_COLORS,
 };
 
 use super::ActionId;
+
+/// Precomputed lookup table for O(1) action decoding
+/// Removes divisions/modulos from MCTS expansion hot path
+static ACTION_LUT: LazyLock<[Action; ACTION_SPACE_SIZE]> = LazyLock::new(|| {
+    let mut lut = [Action {
+        source: DraftSource::Center,
+        color: Color::Blue,
+        dest: DraftDestination::Floor,
+    }; ACTION_SPACE_SIZE];
+
+    for id in 0..ACTION_SPACE_SIZE as u16 {
+        lut[id as usize] = decode_impl(id);
+    }
+    lut
+});
+
+/// Internal decode implementation (used to build LUT)
+fn decode_impl(id: ActionId) -> Action {
+    let mut x = id;
+
+    let d_idx = x % BOARD_SIZE as u16;
+    x /= BOARD_SIZE as u16;
+
+    let d_type = x % 2;
+    x /= 2;
+
+    let c_idx = x % TILE_COLORS as u16;
+    x /= TILE_COLORS as u16;
+
+    let s_idx = x % MAX_FACTORIES as u16;
+    x /= MAX_FACTORIES as u16;
+
+    let s_type = x; // 0 or 1
+
+    let source = if s_type == 0 {
+        DraftSource::Factory(s_idx as u8)
+    } else {
+        DraftSource::Center
+    };
+
+    let color =
+        Color::from_index(c_idx as u8).expect("color index should be valid within action space");
+
+    let dest = if d_type == 0 {
+        DraftDestination::PatternLine(d_idx as u8)
+    } else {
+        DraftDestination::Floor
+    };
+
+    Action {
+        source,
+        color,
+        dest,
+    }
+}
 
 /// Total size of the discrete action space
 /// Calculation: (9 factories + 1 center) * 5 colors * 2 dest_types * 5 dest_indices = 500
@@ -68,49 +125,12 @@ impl ActionEncoder {
     /// This may result in syntactically valid but *illegal* Actions for
     /// the current state. The environment must mask illegal IDs.
     ///
+    /// Uses precomputed LUT for O(1) lookup - no divisions/modulos.
+    ///
     /// Panics if id >= ACTION_SPACE_SIZE.
+    #[inline]
     pub fn decode(id: ActionId) -> Action {
-        assert!(
-            (id as usize) < ACTION_SPACE_SIZE,
-            "ActionId {id} >= ACTION_SPACE_SIZE {ACTION_SPACE_SIZE}"
-        );
-
-        let mut x = id;
-
-        let d_idx = x % BOARD_SIZE as u16;
-        x /= BOARD_SIZE as u16;
-
-        let d_type = x % 2;
-        x /= 2;
-
-        let c_idx = x % TILE_COLORS as u16;
-        x /= TILE_COLORS as u16;
-
-        let s_idx = x % MAX_FACTORIES as u16;
-        x /= MAX_FACTORIES as u16;
-
-        let s_type = x; // 0 or 1
-
-        let source = if s_type == 0 {
-            DraftSource::Factory(s_idx as u8)
-        } else {
-            DraftSource::Center
-        };
-
-        let color = Color::from_index(c_idx as u8)
-            .expect("color index should be valid within action space");
-
-        let dest = if d_type == 0 {
-            DraftDestination::PatternLine(d_idx as u8)
-        } else {
-            DraftDestination::Floor
-        };
-
-        Action {
-            source,
-            color,
-            dest,
-        }
+        ACTION_LUT[id as usize]
     }
 }
 

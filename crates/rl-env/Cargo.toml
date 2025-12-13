@@ -3,6 +3,10 @@ name = "azul-rl-env"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+profiling = []
+
 [dependencies]
 azul-engine = { path = "../engine" }
 rand = "0.9"
@@ -11,4 +15,17 @@ mlx-rs = "0.25"
 
 [dev-dependencies]
 rand = "0.9"
+criterion = "0.5"
+
+[[bench]]
+name = "feature_extractor"
+harness = false
+
+[[bench]]
+name = "mcts"
+harness = false
+
+[[bench]]
+name = "net"
+harness = false
 

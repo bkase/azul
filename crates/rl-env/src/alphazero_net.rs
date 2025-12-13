@@ -389,4 +389,59 @@ mod tests {
         // This should not panic
         TrainableModel::eval_parameters(&net);
     }
+
+    #[test]
+    fn test_save_load_safetensors_roundtrip() {
+        use crate::alphazero::training::TrainableModel;
+
+        let obs_size = 50;
+        let hidden_size = 32;
+        let mut net = AlphaZeroNet::new(obs_size, hidden_size);
+
+        // Get output before saving
+        let obs = Array::zeros::<f32>(&[obs_size as i32]).expect("Failed to create obs");
+        let (policy_before, value_before) = net.predict_single(&obs);
+        let policy_before_slice: Vec<f32> = policy_before.as_slice::<f32>().to_vec();
+
+        // Save to temp file
+        let temp_dir = std::env::temp_dir();
+        let checkpoint_path = temp_dir.join("test_checkpoint.safetensors");
+        TrainableModel::save(&net, &checkpoint_path).expect("Failed to save checkpoint");
+
+        // Create a new network and load the checkpoint
+        let mut net2 = AlphaZeroNet::new(obs_size, hidden_size);
+
+        // New network has different random weights (we don't need to verify this)
+
+        // Load checkpoint into new network
+        TrainableModel::load(&mut net2, &checkpoint_path).expect("Failed to load checkpoint");
+
+        // Get output after loading
+        let (policy_after, value_after) = net2.predict_single(&obs);
+        let policy_after_slice: Vec<f32> = policy_after.as_slice::<f32>().to_vec();
+
+        // Outputs should match the original network
+        for (i, (before, after)) in policy_before_slice
+            .iter()
+            .zip(policy_after_slice.iter())
+            .enumerate()
+        {
+            assert!(
+                (before - after).abs() < 1e-5,
+                "Policy logit {} differs: before={}, after={}",
+                i,
+                before,
+                after
+            );
+        }
+        assert!(
+            (value_before - value_after).abs() < 1e-5,
+            "Value differs: before={}, after={}",
+            value_before,
+            value_after
+        );
+
+        // Clean up
+        let _ = std::fs::remove_file(&checkpoint_path);
+    }
 }

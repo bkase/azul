@@ -8,6 +8,9 @@ use super::{
     Observation, Reward, RewardScheme, StepError, ACTION_SPACE_SIZE,
 };
 
+#[cfg(feature = "profiling")]
+use super::profiling::{Timer, PROF};
+
 /// Generic environment interface for RL
 pub trait Environment {
     /// Type used to represent observations
@@ -50,6 +53,9 @@ pub struct AzulEnv<F: FeatureExtractor> {
 
     /// Whether this episode has ended
     pub done: bool,
+
+    /// Cached zero observation for inactive players (avoids allocation per step)
+    cached_zero_obs: Observation,
 }
 
 impl<F: FeatureExtractor> AzulEnv<F> {
@@ -62,12 +68,16 @@ impl<F: FeatureExtractor> AzulEnv<F> {
             "num_players must be 2, 3, or 4"
         );
 
+        // Pre-allocate zero observation for inactive players
+        let cached_zero_obs = create_zero_observation(features.obs_size());
+
         Self {
             game_state: GameState::default(),
             config,
             features,
             last_action: None,
             done: true, // Not initialized until reset
+            cached_zero_obs,
         }
     }
 
@@ -92,7 +102,8 @@ impl<F: FeatureExtractor> AzulEnv<F> {
             if (idx as u8) < self.game_state.num_players {
                 self.features.encode(&self.game_state, idx as u8)
             } else {
-                create_zero_observation(self.features.obs_size())
+                // Reuse cached zero observation for inactive players
+                self.cached_zero_obs.clone()
             }
         })
     }
@@ -104,6 +115,9 @@ impl<F: FeatureExtractor> Environment for AzulEnv<F> {
     type RewardType = Reward;
 
     fn reset(&mut self, rng: &mut impl Rng) -> EnvStep<Self::ObservationType, Self::RewardType> {
+        #[cfg(feature = "profiling")]
+        let _t = Timer::new(&PROF.time_env_reset_ns);
+
         // 1. Build a fresh GameState
         self.game_state = new_game(self.config.num_players, 0, rng);
         self.last_action = None;
@@ -141,6 +155,9 @@ impl<F: FeatureExtractor> Environment for AzulEnv<F> {
         action_id: Self::ActionType,
         rng: &mut impl Rng,
     ) -> Result<EnvStep<Self::ObservationType, Self::RewardType>, StepError> {
+        #[cfg(feature = "profiling")]
+        let _t = Timer::new(&PROF.time_env_step_ns);
+
         // 1. Check if episode is done
         if self.done {
             return Err(StepError::EpisodeDone);

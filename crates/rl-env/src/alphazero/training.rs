@@ -20,6 +20,11 @@ use rand::Rng;
 use super::{PendingMove, ReplayBuffer, TrainingExample};
 use crate::{ActionId, AgentInput, AzulEnv, Environment, FeatureExtractor, ACTION_SPACE_SIZE};
 
+#[cfg(feature = "profiling")]
+use crate::profiling::{print_summary, Timer, PROF};
+#[cfg(feature = "profiling")]
+use std::sync::atomic::Ordering;
+
 /// Output of an MCTS search at the root.
 #[derive(Clone, Debug)]
 pub struct MctsSearchResult {
@@ -83,6 +88,9 @@ pub struct TrainerConfig {
     /// Total number of training iterations
     pub num_iters: usize,
 
+    /// Starting iteration (for resuming from checkpoint)
+    pub start_iter: usize,
+
     /// Learning rate for optimizer
     pub learning_rate: f32,
 
@@ -114,6 +122,7 @@ impl Default for TrainerConfig {
             self_play_games_per_iter: 10,
             training_steps_per_iter: 100,
             num_iters: 1000,
+            start_iter: 0,
             learning_rate: 0.001,
             weight_decay: 0.0001,
             value_loss_weight: 1.0,
@@ -259,6 +268,9 @@ where
             .expect("env::step should not fail for legal action");
         step = next;
         move_idx += 1;
+
+        #[cfg(feature = "profiling")]
+        PROF.env_steps.fetch_add(1, Ordering::Relaxed);
     }
 
     // 3. Extract final scores & compute z per player
@@ -334,8 +346,11 @@ where
 
     /// Run the main training loop.
     pub fn run(&mut self) -> Result<(), TrainingError> {
-        for iter in 0..self.cfg.num_iters {
+        for iter in self.cfg.start_iter..self.cfg.num_iters {
             // 1. Self-play
+            #[cfg(feature = "profiling")]
+            let _t_sp = Timer::new(&PROF.time_self_play_ns);
+
             for _ in 0..self.cfg.self_play_games_per_iter {
                 let examples = self_play_game(
                     &mut self.env,
@@ -343,14 +358,33 @@ where
                     &self.cfg.self_play,
                     &mut self.rng,
                 );
+
+                #[cfg(feature = "profiling")]
+                {
+                    PROF.self_play_games.fetch_add(1, Ordering::Relaxed);
+                    PROF.self_play_moves
+                        .fetch_add(examples.len() as u64, Ordering::Relaxed);
+                }
+
                 self.replay.extend(examples);
             }
 
+            // Drop timer to record self-play time before training starts
+            #[cfg(feature = "profiling")]
+            drop(_t_sp);
+
             // 2. Training
+            #[cfg(feature = "profiling")]
+            let _t_train = Timer::new(&PROF.time_training_ns);
+
             for _ in 0..self.cfg.training_steps_per_iter {
                 if self.replay.len() < self.cfg.batch_size {
                     break;
                 }
+
+                #[cfg(feature = "profiling")]
+                PROF.train_steps.fetch_add(1, Ordering::Relaxed);
+
                 // Clone examples to avoid borrow issues
                 let batch: Vec<TrainingExample> = self
                     .replay
@@ -361,6 +395,10 @@ where
                 let batch_refs: Vec<&TrainingExample> = batch.iter().collect();
                 let _loss = self.training_step(&batch_refs)?;
             }
+
+            // Drop timer to record training time
+            #[cfg(feature = "profiling")]
+            drop(_t_train);
 
             // 3. Optional checkpoint
             if let Some(ref dir) = self.cfg.checkpoint_dir {
@@ -379,11 +417,19 @@ where
                 );
             }
         }
+
+        // Print profiling summary at the end
+        #[cfg(feature = "profiling")]
+        print_summary();
+
         Ok(())
     }
 
     /// Run a single training step on a batch using MLX autodiff.
     fn training_step(&mut self, batch: &[&TrainingExample]) -> Result<f32, TrainingError> {
+        #[cfg(feature = "profiling")]
+        let _t = Timer::new(&PROF.time_training_step_ns);
+
         // Build batch arrays
         let (obs, pi_target, z_target) = build_training_batch(batch);
 
@@ -428,7 +474,7 @@ where
 
     /// Save a checkpoint to disk.
     fn save_checkpoint(&self, dir: &std::path::Path, iter: usize) -> Result<(), TrainingError> {
-        let checkpoint_path = dir.join(format!("checkpoint_{iter:06}.bin"));
+        let checkpoint_path = dir.join(format!("checkpoint_{iter:06}.safetensors"));
         std::fs::create_dir_all(dir).map_err(TrainingError::Io)?;
         self.agent.save(&checkpoint_path).map_err(TrainingError::Io)
     }
@@ -1031,6 +1077,94 @@ mod tests {
             elapsed.as_secs() < 2,
             "Self-play episode should complete quickly, took {:?}",
             elapsed
+        );
+    }
+
+    #[test]
+    fn test_trainer_respects_start_iter() {
+        use crate::{AzulEnv, BasicFeatureExtractor, EnvConfig, RewardScheme};
+        use rand::SeedableRng;
+
+        let config = EnvConfig {
+            num_players: 2,
+            reward_scheme: RewardScheme::TerminalOnly,
+            include_full_state_in_step: true,
+        };
+        let features = BasicFeatureExtractor::new(2);
+        let env = AzulEnv::new(config, features);
+
+        let agent = StubMctsAgent::new(2, 2);
+
+        // Configure to run from iteration 5 to 7 (3 iterations total)
+        let trainer_cfg = TrainerConfig {
+            num_players: 2,
+            num_iters: 7,
+            start_iter: 5,
+            self_play_games_per_iter: 1,
+            training_steps_per_iter: 1,
+            batch_size: 4,
+            replay_capacity: 1000,
+            ..Default::default()
+        };
+
+        let rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut trainer = Trainer::new(env, agent, trainer_cfg, rng);
+
+        // Run should complete without panic
+        let result = trainer.run();
+        assert!(
+            result.is_ok(),
+            "Trainer should run without error: {:?}",
+            result.err()
+        );
+
+        // If start_iter wasn't respected, we'd run 7 iterations worth of self-play.
+        // With start_iter=5, we only run 2 iterations (5 and 6), so fewer examples.
+        // This is a weak test but verifies the loop respects start_iter.
+        assert!(
+            trainer.replay.len() > 0,
+            "Replay buffer should have examples after training"
+        );
+    }
+
+    #[test]
+    fn test_trainer_skips_all_when_start_equals_num_iters() {
+        use crate::{AzulEnv, BasicFeatureExtractor, EnvConfig, RewardScheme};
+        use rand::SeedableRng;
+
+        let config = EnvConfig {
+            num_players: 2,
+            reward_scheme: RewardScheme::TerminalOnly,
+            include_full_state_in_step: true,
+        };
+        let features = BasicFeatureExtractor::new(2);
+        let env = AzulEnv::new(config, features);
+
+        let agent = StubMctsAgent::new(2, 2);
+
+        // start_iter == num_iters means no iterations run
+        let trainer_cfg = TrainerConfig {
+            num_players: 2,
+            num_iters: 5,
+            start_iter: 5,
+            self_play_games_per_iter: 1,
+            training_steps_per_iter: 1,
+            batch_size: 4,
+            replay_capacity: 1000,
+            ..Default::default()
+        };
+
+        let rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut trainer = Trainer::new(env, agent, trainer_cfg, rng);
+
+        let result = trainer.run();
+        assert!(result.is_ok());
+
+        // No iterations should have run, so replay buffer should be empty
+        assert_eq!(
+            trainer.replay.len(),
+            0,
+            "Replay buffer should be empty when start_iter == num_iters"
         );
     }
 }

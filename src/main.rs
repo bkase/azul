@@ -8,10 +8,21 @@ use clap::Parser;
 use rand::SeedableRng;
 
 use azul_rl_env::{
-    alphazero::training::{Trainer, TrainerConfig},
+    alphazero::training::{TrainableModel, Trainer, TrainerConfig},
     AlphaZeroMctsAgent, AlphaZeroNet, AzulEnv, BasicFeatureExtractor, EnvConfig, FeatureExtractor,
     MctsConfig, RewardScheme,
 };
+
+/// Parse iteration number from checkpoint filename.
+///
+/// Expected format: `checkpoint_NNNNNN.safetensors` where NNNNNN is a zero-padded iteration number.
+/// Returns `None` if the filename doesn't match the expected pattern.
+fn parse_iteration_from_checkpoint(path: &std::path::Path) -> Option<usize> {
+    let filename = path.file_name()?.to_str()?;
+    let stem = filename.strip_suffix(".safetensors")?;
+    let iter_str = stem.strip_prefix("checkpoint_")?;
+    iter_str.parse().ok()
+}
 
 /// AlphaZero training for Azul
 #[derive(Parser, Debug)]
@@ -45,6 +56,15 @@ struct Args {
     /// Disable checkpointing entirely (for quick experiments/profiling)
     #[arg(long, default_value_t = false)]
     no_checkpoints: bool,
+
+    /// Disable training (for profiling self-play/MCTS separately)
+    #[arg(long, default_value_t = false)]
+    no_train: bool,
+
+    /// Resume training from a checkpoint file (e.g., checkpoints/checkpoint_000050.safetensors)
+    /// If provided, loads weights and resumes from the iteration encoded in the filename.
+    #[arg(long)]
+    resume: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -56,10 +76,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    // If --no-train is set, override training_steps to 0
+    let training_steps = if args.no_train { 0 } else { args.training_steps };
+
+    // Determine start iteration from resume checkpoint
+    let start_iter = if let Some(ref checkpoint_path) = args.resume {
+        match parse_iteration_from_checkpoint(checkpoint_path) {
+            Some(iter) => {
+                eprintln!("Resuming from checkpoint: {checkpoint_path:?} (iteration {iter})");
+                iter + 1 // Start from the next iteration
+            }
+            None => {
+                eprintln!(
+                    "Warning: Could not parse iteration from checkpoint filename {:?}, starting from 0",
+                    checkpoint_path
+                );
+                0
+            }
+        }
+    } else {
+        0
+    };
+
     let config = TrainerConfig {
         num_iters: args.num_iters,
+        start_iter,
         self_play_games_per_iter: args.games_per_iter,
-        training_steps_per_iter: args.training_steps,
+        training_steps_per_iter: training_steps,
         batch_size: args.batch_size,
         self_play: azul_rl_env::alphazero::training::SelfPlayConfig {
             mcts_simulations: args.mcts_sims,
@@ -72,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     eprintln!("AlphaZero Training Configuration:");
-    eprintln!("  Iterations: {}", config.num_iters);
+    eprintln!("  Iterations: {} (starting from {})", config.num_iters, config.start_iter);
     eprintln!("  Games per iteration: {}", config.self_play_games_per_iter);
     eprintln!(
         "  Training steps per iteration: {}",
@@ -100,7 +143,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create agent with AlphaZeroNet
     let hidden_size = 128;
     let obs_size = features.obs_size();
-    let net = AlphaZeroNet::new(obs_size, hidden_size);
+    let mut net = AlphaZeroNet::new(obs_size, hidden_size);
+
+    // Load checkpoint if resuming
+    if let Some(ref checkpoint_path) = args.resume {
+        eprintln!("Loading weights from checkpoint...");
+        net.load(checkpoint_path)?;
+        eprintln!("Weights loaded successfully.");
+    }
+
     let mcts_config = MctsConfig {
         num_simulations: config.self_play.mcts_simulations as u32,
         ..Default::default()
@@ -119,4 +170,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("Training complete!");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_parse_iteration_from_checkpoint_valid() {
+        let path = Path::new("checkpoints/checkpoint_000050.safetensors");
+        assert_eq!(parse_iteration_from_checkpoint(path), Some(50));
+
+        let path = Path::new("checkpoint_000000.safetensors");
+        assert_eq!(parse_iteration_from_checkpoint(path), Some(0));
+
+        let path = Path::new("/some/deep/path/checkpoint_001234.safetensors");
+        assert_eq!(parse_iteration_from_checkpoint(path), Some(1234));
+    }
+
+    #[test]
+    fn test_parse_iteration_from_checkpoint_invalid() {
+        // Wrong extension
+        let path = Path::new("checkpoint_000050.bin");
+        assert_eq!(parse_iteration_from_checkpoint(path), None);
+
+        // Wrong prefix
+        let path = Path::new("model_000050.safetensors");
+        assert_eq!(parse_iteration_from_checkpoint(path), None);
+
+        // No number
+        let path = Path::new("checkpoint_.safetensors");
+        assert_eq!(parse_iteration_from_checkpoint(path), None);
+
+        // Invalid number
+        let path = Path::new("checkpoint_abc.safetensors");
+        assert_eq!(parse_iteration_from_checkpoint(path), None);
+    }
+
+    #[test]
+    fn test_parse_iteration_handles_large_numbers() {
+        let path = Path::new("checkpoint_999999.safetensors");
+        assert_eq!(parse_iteration_from_checkpoint(path), Some(999999));
+    }
 }

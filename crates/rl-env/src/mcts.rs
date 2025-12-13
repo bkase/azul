@@ -15,6 +15,11 @@ use crate::{
     ActionEncoder, ActionId, Agent, AgentInput, FeatureExtractor, Observation, ACTION_SPACE_SIZE,
 };
 
+#[cfg(feature = "profiling")]
+use crate::profiling::{Timer, PROF};
+#[cfg(feature = "profiling")]
+use std::sync::atomic::Ordering;
+
 /// Batch of training examples for neural network training.
 /// Arrays are stacked for efficient batch processing.
 #[derive(Clone)]
@@ -159,6 +164,11 @@ where
         root_state: &GameState,
         rng: &mut impl Rng,
     ) -> [f32; ACTION_SPACE_SIZE] {
+        #[cfg(feature = "profiling")]
+        let _t = Timer::new(&PROF.time_mcts_search_ns);
+        #[cfg(feature = "profiling")]
+        PROF.mcts_searches.fetch_add(1, Ordering::Relaxed);
+
         // Initialize tree with root node
         let mut tree = MctsTree::default();
 
@@ -199,6 +209,9 @@ where
         state: GameState,
         _rng: &mut impl Rng,
     ) -> NodeIdx {
+        #[cfg(feature = "profiling")]
+        PROF.mcts_nodes_created.fetch_add(1, Ordering::Relaxed);
+
         let to_play = state.current_player;
         let is_terminal = state.phase == Phase::GameOver;
 
@@ -221,7 +234,13 @@ where
 
         // Encode state and get network prediction
         let obs = self.features.encode(&state, to_play);
-        let (policy_logits, _value) = self.net.predict_single(&obs);
+        let (policy_logits, _value) = {
+            #[cfg(feature = "profiling")]
+            let _t = Timer::new(&PROF.time_mcts_nn_eval_ns);
+            #[cfg(feature = "profiling")]
+            PROF.mcts_nn_evals.fetch_add(1, Ordering::Relaxed);
+            self.net.predict_single(&obs)
+        };
         let policy_logits_slice = policy_logits.as_slice::<f32>();
 
         // Build (action_id, logit) pairs for legal actions
@@ -261,6 +280,11 @@ where
 
     /// Run one MCTS simulation from root.
     fn simulate(&mut self, tree: &mut MctsTree, root_idx: NodeIdx, rng: &mut impl Rng) {
+        #[cfg(feature = "profiling")]
+        let _t = Timer::new(&PROF.time_mcts_simulate_ns);
+        #[cfg(feature = "profiling")]
+        PROF.mcts_simulations.fetch_add(1, Ordering::Relaxed);
+
         let mut path: Vec<PathStep> = Vec::new();
         let mut current_idx = root_idx;
 
@@ -314,7 +338,13 @@ where
         } else {
             // Use network value
             let obs = self.features.encode(&leaf_node.state, leaf_node.to_play);
-            let (_policy, value) = self.net.predict_single(&obs);
+            let (_policy, value) = {
+                #[cfg(feature = "profiling")]
+                let _t = Timer::new(&PROF.time_mcts_nn_eval_ns);
+                #[cfg(feature = "profiling")]
+                PROF.mcts_nn_evals.fetch_add(1, Ordering::Relaxed);
+                self.net.predict_single(&obs)
+            };
             value
         };
 

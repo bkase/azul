@@ -47,16 +47,22 @@ pub fn create_zero_observation(obs_size: usize) -> Observation {
 #[derive(Clone, Debug)]
 pub struct BasicFeatureExtractor {
     num_players: u8,
+    /// Cached observation size (computed once in new())
+    cached_obs_size: usize,
 }
 
 impl BasicFeatureExtractor {
     pub fn new(num_players: u8) -> Self {
         assert!((2..=4).contains(&num_players));
-        Self { num_players }
+        let cached_obs_size = Self::calculate_obs_size_static();
+        Self {
+            num_players,
+            cached_obs_size,
+        }
     }
 
-    /// Calculate the observation size for this extractor
-    fn calculate_obs_size(&self) -> usize {
+    /// Calculate the observation size (static version for caching)
+    fn calculate_obs_size_static() -> usize {
         // Factories: MAX_FACTORIES * TILE_COLORS (count of each color)
         let factory_features = MAX_FACTORIES * TILE_COLORS;
 
@@ -97,8 +103,9 @@ impl BasicFeatureExtractor {
 }
 
 impl FeatureExtractor for BasicFeatureExtractor {
+    #[inline]
     fn obs_size(&self) -> usize {
-        self.calculate_obs_size()
+        self.cached_obs_size
     }
 
     fn encode(&self, state: &GameState, player: PlayerIdx) -> Observation {

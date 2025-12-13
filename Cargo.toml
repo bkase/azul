@@ -7,6 +7,10 @@ name = "azul"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+profiling = ["azul-rl-env/profiling"]
+
 [dependencies]
 azul-engine = { path = "crates/engine" }
 azul-rl-env = { path = "crates/rl-env" }
