@@ -10,6 +10,7 @@ use azul_engine::{apply_action, legal_actions, GameState, Phase, PlayerIdx};
 use mlx_rs::Array;
 use rand::Rng;
 use rand_distr::{Distribution, Gamma};
+use std::collections::HashMap;
 
 use crate::{
     ActionEncoder, ActionId, Agent, AgentInput, FeatureExtractor, Observation, ACTION_SPACE_SIZE,
@@ -78,6 +79,14 @@ pub struct MctsConfig {
 
     /// Maximum search depth in playouts (safety bound).
     pub max_depth: u32,
+
+    /// How many leaf positions to evaluate per NN batch.
+    /// If 1 => sequential but still uses predict_batch(B=1) path.
+    pub nn_batch_size: usize,
+
+    /// Virtual loss magnitude for in-flight simulations.
+    /// Typical: 1.0 when values are in [-1, 1].
+    pub virtual_loss: f32,
 }
 
 impl Default for MctsConfig {
@@ -89,6 +98,8 @@ impl Default for MctsConfig {
             root_dirichlet_alpha: 0.3,
             temperature: 1.0,
             max_depth: 200,
+            nn_batch_size: 32,
+            virtual_loss: 1.0,
         }
     }
 }
@@ -104,6 +115,9 @@ pub struct ChildEdge {
     pub visit_count: u32,       // N(s, a)
     pub value_sum: f32,         // W(s, a), sum of backed-up values
     pub child: Option<NodeIdx>, // None until first expansion along this edge
+    /// True if this edge has a pending expansion in the current batch.
+    /// Used to prevent multiple simulations from selecting the same unexpanded edge.
+    pub pending: bool,
 }
 
 /// Node in the MCTS tree.
@@ -118,6 +132,10 @@ pub struct Node {
 
     /// Cumulative visit count at this node (sum over children)
     pub visit_count: u32,
+
+    /// Value predicted when the node was expanded.
+    /// None for stub nodes (before NN evaluation), Some(value) after expansion.
+    pub nn_value: Option<f32>,
 }
 
 /// The MCTS tree structure.
@@ -131,6 +149,20 @@ pub struct MctsTree {
 struct PathStep {
     node_idx: NodeIdx,
     child_idx: usize,
+}
+
+/// In-flight simulation tracking for batched MCTS.
+/// Tracks path from root to leaf for backup after batch NN evaluation.
+struct PendingSim {
+    /// Path from root to leaf (for backup).
+    path: Vec<PathStep>,
+    /// Index of the leaf node reached.
+    leaf_idx: NodeIdx,
+    /// Value at the leaf (filled after NN eval or terminal computation).
+    leaf_value: f32,
+    /// Slot in the batch array if this leaf needs NN evaluation.
+    /// None for terminal nodes.
+    eval_slot: Option<usize>,
 }
 
 /// AlphaZero MCTS Agent that performs tree search guided by a neural network.
@@ -157,8 +189,230 @@ where
         }
     }
 
+    /// Create a lightweight stub node without NN evaluation.
+    /// Children remain empty until expand_node_from_nn is called.
+    fn create_node_stub(&self, tree: &mut MctsTree, state: GameState) -> NodeIdx {
+        let to_play = state.current_player;
+        let is_terminal = state.phase == Phase::GameOver;
+
+        let node = Node {
+            state,
+            to_play,
+            is_terminal,
+            children: Vec::new(),
+            visit_count: 0,
+            nn_value: None,
+        };
+        let idx = tree.nodes.len() as NodeIdx;
+        tree.nodes.push(node);
+        idx
+    }
+
+    /// Expand a node given NN outputs (policy logits row + value).
+    /// This is idempotent - won't re-expand if children already exist.
+    fn expand_node_from_nn(
+        &mut self,
+        tree: &mut MctsTree,
+        node_idx: NodeIdx,
+        policy_logits_row: &[f32], // len == ACTION_SPACE_SIZE
+        value: f32,
+    ) {
+        let node = &mut tree.nodes[node_idx as usize];
+
+        if node.is_terminal {
+            node.nn_value = Some(value);
+            return;
+        }
+
+        // Only expand once (idempotent)
+        if !node.children.is_empty() {
+            return;
+        }
+
+        node.nn_value = Some(value);
+
+        let actions = legal_actions(&node.state);
+
+        let mut legal_ids_and_logits: Vec<(ActionId, f32)> = Vec::with_capacity(actions.len());
+        for action in &actions {
+            let id = ActionEncoder::encode(action);
+            legal_ids_and_logits.push((id, policy_logits_row[id as usize]));
+        }
+
+        let priors = softmax(&legal_ids_and_logits);
+
+        node.children = priors
+            .into_iter()
+            .map(|(id, prior)| ChildEdge {
+                action_id: id,
+                prior,
+                visit_count: 0,
+                value_sum: 0.0,
+                child: None,
+                pending: false,
+            })
+            .collect();
+    }
+
+    /// Select a leaf node for evaluation, applying virtual loss along the path.
+    /// Creates stub nodes for unexpanded edges.
+    fn select_leaf(&mut self, tree: &mut MctsTree, root_idx: NodeIdx, rng: &mut impl Rng) -> PendingSim {
+        let mut path: Vec<PathStep> = Vec::new();
+        let mut current_idx = root_idx;
+
+        for _depth in 0..(self.config.max_depth as usize) {
+            let is_terminal;
+            let has_children;
+            {
+                let node = &tree.nodes[current_idx as usize];
+                is_terminal = node.is_terminal;
+                has_children = !node.children.is_empty();
+            }
+
+            // Stop at terminal or unexpanded nodes
+            if is_terminal || !has_children {
+                break;
+            }
+
+            // Choose child via PUCT
+            let child_idx = {
+                let node = &tree.nodes[current_idx as usize];
+                select_child(node, self.config.cpuct)
+            };
+
+            // Record and apply virtual loss on the chosen edge
+            let step = PathStep {
+                node_idx: current_idx,
+                child_idx,
+            };
+            apply_virtual_loss(tree, &step, self.config.virtual_loss);
+            path.push(step);
+
+            // Descend or expand stub
+            let next_child_opt = tree.nodes[current_idx as usize].children[child_idx].child;
+            if let Some(next_idx) = next_child_opt {
+                current_idx = next_idx;
+                continue;
+            }
+
+            // Expand edge by creating child stub node
+            let parent_state = tree.nodes[current_idx as usize].state.clone();
+            let action_id = tree.nodes[current_idx as usize].children[child_idx].action_id;
+            let action = ActionEncoder::decode(action_id);
+
+            let step_result = apply_action(parent_state, action, rng)
+                .expect("MCTS should only expand legal actions");
+
+            let new_idx = self.create_node_stub(tree, step_result.state);
+            tree.nodes[current_idx as usize].children[child_idx].child = Some(new_idx);
+            // Mark edge as pending to prevent other simulations from selecting same leaf
+            tree.nodes[current_idx as usize].children[child_idx].pending = true;
+
+            current_idx = new_idx;
+            break;
+        }
+
+        PendingSim {
+            path,
+            leaf_idx: current_idx,
+            leaf_value: 0.0,  // filled later
+            eval_slot: None,  // filled later
+        }
+    }
+
+    /// Process a batch of pending simulations with batched NN evaluation.
+    /// Uses provided scratch buffers to avoid per-call allocations.
+    fn process_batch(
+        &mut self,
+        tree: &mut MctsTree,
+        sims: &mut [PendingSim],
+        unique_leafs: &mut Vec<NodeIdx>,
+        leaf_to_slot: &mut HashMap<NodeIdx, usize>,
+        obs_scratch: &mut Vec<f32>,
+    ) {
+        // 1) Identify which leaves need NN evaluation; compute terminal ones immediately
+        unique_leafs.clear();
+        leaf_to_slot.clear();
+
+        for sim in sims.iter_mut() {
+            let leaf = &tree.nodes[sim.leaf_idx as usize];
+            if leaf.is_terminal {
+                sim.leaf_value = compute_terminal_value(&leaf.state, leaf.to_play);
+                sim.eval_slot = None;
+            } else {
+                let slot = *leaf_to_slot.entry(sim.leaf_idx).or_insert_with(|| {
+                    let s = unique_leafs.len();
+                    unique_leafs.push(sim.leaf_idx);
+                    s
+                });
+                sim.eval_slot = Some(slot);
+            }
+        }
+
+        // 2) If any NN leaves exist, batch them
+        if !unique_leafs.is_empty() {
+            let obs_size = self.features.obs_size();
+            let b = unique_leafs.len();
+
+            // Build [B, obs_size] contiguous buffer using scratch
+            obs_scratch.clear();
+            for &node_idx in unique_leafs.iter() {
+                let node = &tree.nodes[node_idx as usize];
+                let obs = self.features.encode(&node.state, node.to_play);
+                obs_scratch.extend_from_slice(obs.as_slice::<f32>());
+            }
+
+            let obs_batch = Array::from_slice(obs_scratch, &[b as i32, obs_size as i32]);
+
+            // NN inference with profiling
+            let (policy_logits_batch, values_batch) = {
+                #[cfg(feature = "profiling")]
+                let _t = Timer::new(&PROF.time_mcts_nn_eval_ns);
+                #[cfg(feature = "profiling")]
+                {
+                    PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
+                    PROF.mcts_nn_positions.fetch_add(b as u64, Ordering::Relaxed);
+                }
+                self.net.predict_batch(&obs_batch)
+            };
+
+            let logits = policy_logits_batch.as_slice::<f32>();
+            let values = values_batch.as_slice::<f32>();
+
+            // 3) Expand each unique leaf using its logits row, and store leaf value
+            for (slot, &node_idx) in unique_leafs.iter().enumerate() {
+                let value = values[slot];
+                let row_start = slot * ACTION_SPACE_SIZE;
+                let row_end = row_start + ACTION_SPACE_SIZE;
+                let logits_row = &logits[row_start..row_end];
+
+                if tree.nodes[node_idx as usize].children.is_empty() {
+                    self.expand_node_from_nn(tree, node_idx, logits_row, value);
+                }
+            }
+
+            // Fill leaf_value for each sim
+            for sim in sims.iter_mut() {
+                if let Some(slot) = sim.eval_slot {
+                    sim.leaf_value = values[slot];
+                }
+            }
+        }
+
+        // 4) Backup each simulation result and clear pending flags
+        for sim in sims.iter() {
+            backup_with_virtual_loss(tree, &sim.path, sim.leaf_value, self.config.virtual_loss);
+
+            // Clear pending flag on the edge that led to this leaf
+            if let Some(last_step) = sim.path.last() {
+                tree.nodes[last_step.node_idx as usize].children[last_step.child_idx].pending = false;
+            }
+        }
+    }
+
     /// Main MCTS search entrypoint.
     /// Returns improved policy over ACTION_SPACE_SIZE.
+    /// Uses batched NN inference for efficiency.
     fn run_search(
         &mut self,
         root_state: &GameState,
@@ -169,11 +423,37 @@ where
         #[cfg(feature = "profiling")]
         PROF.mcts_searches.fetch_add(1, Ordering::Relaxed);
 
-        // Initialize tree with root node
+        // Initialize tree with root stub
         let mut tree = MctsTree::default();
+        let root_idx = self.create_node_stub(&mut tree, root_state.clone());
 
-        // Create root node
-        let root_idx = self.create_node(&mut tree, root_state.clone(), rng);
+        // Expand root using predict_batch(B=1) to avoid predict_single overhead
+        {
+            let obs_size = self.features.obs_size();
+            let root = &tree.nodes[root_idx as usize];
+            let obs = self.features.encode(&root.state, root.to_play);
+            let obs_data = obs.as_slice::<f32>().to_vec();
+            let obs_batch = Array::from_slice(&obs_data, &[1, obs_size as i32]);
+
+            let (policy_logits_batch, values_batch) = {
+                #[cfg(feature = "profiling")]
+                let _t = Timer::new(&PROF.time_mcts_nn_eval_ns);
+                #[cfg(feature = "profiling")]
+                {
+                    PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
+                    PROF.mcts_nn_positions.fetch_add(1, Ordering::Relaxed);
+                }
+                self.net.predict_batch(&obs_batch)
+            };
+
+            let logits = policy_logits_batch.as_slice::<f32>();
+            let values = values_batch.as_slice::<f32>();
+
+            let logits_row = &logits[0..ACTION_SPACE_SIZE];
+            let value = values[0];
+
+            self.expand_node_from_nn(&mut tree, root_idx, logits_row, value);
+        }
 
         // Add Dirichlet noise to root priors
         if self.config.root_dirichlet_alpha > 0.0
@@ -187,9 +467,37 @@ where
             );
         }
 
-        // Run simulations
-        for _ in 0..self.config.num_simulations {
-            self.simulate(&mut tree, root_idx, rng);
+        // Batched simulations - preallocate scratch buffers
+        let total = self.config.num_simulations as usize;
+        let batch_size = self.config.nn_batch_size.max(1).min(total);
+        let obs_size = self.features.obs_size();
+
+        // Scratch buffers reused across all batches
+        let mut sims: Vec<PendingSim> = Vec::with_capacity(batch_size);
+        let mut unique_leafs: Vec<NodeIdx> = Vec::with_capacity(batch_size);
+        let mut leaf_to_slot: HashMap<NodeIdx, usize> = HashMap::with_capacity(batch_size);
+        let mut obs_scratch: Vec<f32> = Vec::with_capacity(batch_size * obs_size);
+
+        let mut done = 0;
+        while done < total {
+            let n = (total - done).min(batch_size);
+
+            sims.clear();
+            for _ in 0..n {
+                #[cfg(feature = "profiling")]
+                PROF.mcts_simulations.fetch_add(1, Ordering::Relaxed);
+
+                sims.push(self.select_leaf(&mut tree, root_idx, rng));
+            }
+
+            self.process_batch(
+                &mut tree,
+                &mut sims[..],
+                &mut unique_leafs,
+                &mut leaf_to_slot,
+                &mut obs_scratch,
+            );
+            done += n;
         }
 
         // Extract policy from root visit counts
@@ -201,159 +509,10 @@ where
 
         apply_temperature(&counts, self.config.temperature)
     }
-
-    /// Create a new node in the tree, expanding it with neural network evaluation.
-    fn create_node(
-        &mut self,
-        tree: &mut MctsTree,
-        state: GameState,
-        _rng: &mut impl Rng,
-    ) -> NodeIdx {
-        #[cfg(feature = "profiling")]
-        PROF.mcts_nodes_created.fetch_add(1, Ordering::Relaxed);
-
-        let to_play = state.current_player;
-        let is_terminal = state.phase == Phase::GameOver;
-
-        // Terminal nodes have no children
-        if is_terminal {
-            let node = Node {
-                state,
-                to_play,
-                is_terminal,
-                children: Vec::new(),
-                visit_count: 0,
-            };
-            let idx = tree.nodes.len() as NodeIdx;
-            tree.nodes.push(node);
-            return idx;
-        }
-
-        // Get legal actions from engine
-        let actions = legal_actions(&state);
-
-        // Encode state and get network prediction
-        let obs = self.features.encode(&state, to_play);
-        let (policy_logits, _value) = {
-            #[cfg(feature = "profiling")]
-            let _t = Timer::new(&PROF.time_mcts_nn_eval_ns);
-            #[cfg(feature = "profiling")]
-            PROF.mcts_nn_evals.fetch_add(1, Ordering::Relaxed);
-            self.net.predict_single(&obs)
-        };
-        let policy_logits_slice = policy_logits.as_slice::<f32>();
-
-        // Build (action_id, logit) pairs for legal actions
-        let mut legal_ids_and_logits: Vec<(ActionId, f32)> = Vec::with_capacity(actions.len());
-        for action in &actions {
-            let id = ActionEncoder::encode(action);
-            let logit = policy_logits_slice[id as usize];
-            legal_ids_and_logits.push((id, logit));
-        }
-
-        // Compute softmax priors over legal actions
-        let priors = softmax(&legal_ids_and_logits);
-
-        // Create child edges
-        let children = priors
-            .into_iter()
-            .map(|(id, prior)| ChildEdge {
-                action_id: id,
-                prior,
-                visit_count: 0,
-                value_sum: 0.0,
-                child: None,
-            })
-            .collect();
-
-        let node = Node {
-            state,
-            to_play,
-            is_terminal,
-            children,
-            visit_count: 0,
-        };
-        let idx = tree.nodes.len() as NodeIdx;
-        tree.nodes.push(node);
-        idx
-    }
-
-    /// Run one MCTS simulation from root.
-    fn simulate(&mut self, tree: &mut MctsTree, root_idx: NodeIdx, rng: &mut impl Rng) {
-        #[cfg(feature = "profiling")]
-        let _t = Timer::new(&PROF.time_mcts_simulate_ns);
-        #[cfg(feature = "profiling")]
-        PROF.mcts_simulations.fetch_add(1, Ordering::Relaxed);
-
-        let mut path: Vec<PathStep> = Vec::new();
-        let mut current_idx = root_idx;
-
-        // Selection: traverse tree using PUCT until we reach a leaf
-        loop {
-            let node = &tree.nodes[current_idx as usize];
-
-            if node.is_terminal {
-                break;
-            }
-
-            if node.children.is_empty() {
-                break;
-            }
-
-            // Check if we've reached max depth
-            if path.len() >= self.config.max_depth as usize {
-                break;
-            }
-
-            let child_idx = select_child(node, self.config.cpuct);
-            let edge = &tree.nodes[current_idx as usize].children[child_idx];
-
-            path.push(PathStep {
-                node_idx: current_idx,
-                child_idx,
-            });
-
-            if let Some(next_idx) = edge.child {
-                current_idx = next_idx;
-            } else {
-                // Expansion: create child node
-                let parent_state = tree.nodes[current_idx as usize].state.clone();
-                let action = ActionEncoder::decode(edge.action_id);
-
-                let step_result = apply_action(parent_state, action, rng)
-                    .expect("MCTS should only expand legal actions");
-
-                let new_idx = self.create_node(tree, step_result.state, rng);
-                tree.nodes[current_idx as usize].children[child_idx].child = Some(new_idx);
-                current_idx = new_idx;
-                break;
-            }
-        }
-
-        // Evaluation: get value for leaf node
-        let leaf_node = &tree.nodes[current_idx as usize];
-        let leaf_value = if leaf_node.is_terminal {
-            // Compute terminal value from game scores
-            compute_terminal_value(&leaf_node.state, leaf_node.to_play)
-        } else {
-            // Use network value
-            let obs = self.features.encode(&leaf_node.state, leaf_node.to_play);
-            let (_policy, value) = {
-                #[cfg(feature = "profiling")]
-                let _t = Timer::new(&PROF.time_mcts_nn_eval_ns);
-                #[cfg(feature = "profiling")]
-                PROF.mcts_nn_evals.fetch_add(1, Ordering::Relaxed);
-                self.net.predict_single(&obs)
-            };
-            value
-        };
-
-        // Backup: propagate value back through path
-        backup(tree, &path, leaf_value);
-    }
 }
 
 /// PUCT selection: choose child with highest Q + U score.
+/// Skips unexpanded edges with pending=true to improve batch diversity.
 fn select_child(node: &Node, cpuct: f32) -> usize {
     let mut best_idx = 0;
     let mut best_score = f32::NEG_INFINITY;
@@ -361,6 +520,12 @@ fn select_child(node: &Node, cpuct: f32) -> usize {
     let parent_n = node.visit_count.max(1) as f32;
 
     for (i, edge) in node.children.iter().enumerate() {
+        // Skip unexpanded edges that are already pending in this batch
+        // This forces different simulations to explore different paths
+        if edge.pending && edge.child.is_none() {
+            continue;
+        }
+
         let q = if edge.visit_count > 0 {
             edge.value_sum / edge.visit_count as f32
         } else {
@@ -378,11 +543,46 @@ fn select_child(node: &Node, cpuct: f32) -> usize {
     best_idx
 }
 
-/// Backup value through the path, flipping sign for 2-player zero-sum.
-fn backup(tree: &mut MctsTree, path: &[PathStep], leaf_value: f32) {
+/// Apply virtual loss to an edge to discourage other in-flight simulations
+/// from selecting the same path.
+fn apply_virtual_loss(tree: &mut MctsTree, step: &PathStep, vloss: f32) {
+    let node = &mut tree.nodes[step.node_idx as usize];
+    let edge = &mut node.children[step.child_idx];
+
+    // Virtual visit
+    edge.visit_count += 1;
+    node.visit_count += 1;
+
+    // Penalize Q to discourage collisions
+    edge.value_sum -= vloss;
+}
+
+/// Revert virtual loss from an edge.
+fn revert_virtual_loss(tree: &mut MctsTree, step: &PathStep, vloss: f32) {
+    let node = &mut tree.nodes[step.node_idx as usize];
+    let edge = &mut node.children[step.child_idx];
+
+    // Catch underflow bugs in debug
+    debug_assert!(edge.visit_count > 0, "virtual loss underflow on edge");
+    debug_assert!(node.visit_count > 0, "virtual loss underflow on node");
+
+    // Revert virtual visit
+    edge.visit_count -= 1;
+    node.visit_count -= 1;
+
+    // Revert virtual penalty
+    edge.value_sum += vloss;
+}
+
+/// Backup with virtual loss: first revert virtual loss, then apply real backup.
+fn backup_with_virtual_loss(tree: &mut MctsTree, path: &[PathStep], leaf_value: f32, vloss: f32) {
     let mut value = leaf_value;
 
     for step in path.iter().rev() {
+        // Remove virtual loss for this in-flight sim
+        revert_virtual_loss(tree, step, vloss);
+
+        // Apply real backup
         let node = &mut tree.nodes[step.node_idx as usize];
         let edge = &mut node.children[step.child_idx];
 
@@ -706,6 +906,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alphazero::training::MctsAgentExt;
     use crate::{AzulEnv, BasicFeatureExtractor, EnvConfig, Environment, RewardScheme};
     use rand::SeedableRng;
 
@@ -731,8 +932,22 @@ mod tests {
             (arr, self.value)
         }
 
-        fn predict_batch(&mut self, _obs_batch: &Array) -> (Array, Array) {
-            unimplemented!("DummyNet::predict_batch not implemented for tests")
+        fn predict_batch(&mut self, obs_batch: &Array) -> (Array, Array) {
+            let batch_size = obs_batch.shape()[0] as usize;
+
+            // Tile priors across batch
+            let mut policies = Vec::with_capacity(batch_size * ACTION_SPACE_SIZE);
+            for _ in 0..batch_size {
+                policies.extend_from_slice(&self.priors);
+            }
+
+            // Same value for all positions
+            let values = vec![self.value; batch_size];
+
+            let policy_arr =
+                Array::from_slice(&policies, &[batch_size as i32, ACTION_SPACE_SIZE as i32]);
+            let values_arr = Array::from_slice(&values, &[batch_size as i32]);
+            (policy_arr, values_arr)
         }
     }
 
@@ -742,6 +957,10 @@ mod tests {
         assert_eq!(config.num_simulations, 256);
         assert_eq!(config.cpuct, 1.5);
         assert_eq!(config.temperature, 1.0);
+        assert_eq!(config.max_depth, 200);
+        // Batching defaults
+        assert_eq!(config.nn_batch_size, 32);
+        assert_eq!(config.virtual_loss, 1.0);
     }
 
     #[test]
@@ -1010,6 +1229,55 @@ mod tests {
         assert!(
             step.state.is_some(),
             "EnvStep.state should be Some when include_full_state_in_step is true"
+        );
+    }
+
+    #[test]
+    fn test_batched_mcts_invariants() {
+        let config = EnvConfig {
+            num_players: 2,
+            reward_scheme: RewardScheme::TerminalOnly,
+            include_full_state_in_step: true,
+        };
+        let features = BasicFeatureExtractor::new(2);
+        let mut env = AzulEnv::new(config, features.clone());
+
+        // Use explicit batching config
+        let mcts_config = MctsConfig {
+            num_simulations: 50,
+            nn_batch_size: 8, // Batched!
+            virtual_loss: 1.0,
+            ..MctsConfig::default()
+        };
+
+        let dummy_net = DummyNet::uniform(0.0);
+        let mut agent = AlphaZeroMctsAgent::new(mcts_config, features, dummy_net);
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let step = env.reset(&mut rng);
+
+        let input = AgentInput {
+            observation: &step.observations[step.current_player as usize],
+            legal_action_mask: &step.legal_action_mask,
+            current_player: step.current_player,
+            state: step.state.as_ref(),
+        };
+
+        let result = agent.select_action_and_policy(&input, 1.0, &mut rng);
+
+        // Policy sums to ~1 (after masking and renormalization)
+        let policy_sum: f32 = result.policy.iter().sum();
+        assert!(
+            (policy_sum - 1.0).abs() < 0.01,
+            "Policy should sum to 1, got {}",
+            policy_sum
+        );
+
+        // Action is legal
+        assert!(
+            step.legal_action_mask[result.action as usize],
+            "Selected action {} must be legal",
+            result.action
         );
     }
 }

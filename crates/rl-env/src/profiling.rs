@@ -20,6 +20,8 @@ pub struct Counters {
     pub mcts_simulations: AtomicU64,
     pub mcts_nodes_created: AtomicU64,
     pub mcts_nn_evals: AtomicU64,
+    pub mcts_nn_batches: AtomicU64,    // number of predict_batch calls
+    pub mcts_nn_positions: AtomicU64,  // total positions evaluated (sum of batch sizes)
     pub train_steps: AtomicU64,
     pub fd_forward_evals: AtomicU64,
     pub env_steps: AtomicU64,
@@ -49,6 +51,8 @@ impl Counters {
             mcts_simulations: AtomicU64::new(0),
             mcts_nodes_created: AtomicU64::new(0),
             mcts_nn_evals: AtomicU64::new(0),
+            mcts_nn_batches: AtomicU64::new(0),
+            mcts_nn_positions: AtomicU64::new(0),
             train_steps: AtomicU64::new(0),
             fd_forward_evals: AtomicU64::new(0),
             env_steps: AtomicU64::new(0),
@@ -76,6 +80,8 @@ impl Counters {
         self.mcts_simulations.store(0, Ordering::Relaxed);
         self.mcts_nodes_created.store(0, Ordering::Relaxed);
         self.mcts_nn_evals.store(0, Ordering::Relaxed);
+        self.mcts_nn_batches.store(0, Ordering::Relaxed);
+        self.mcts_nn_positions.store(0, Ordering::Relaxed);
         self.train_steps.store(0, Ordering::Relaxed);
         self.fd_forward_evals.store(0, Ordering::Relaxed);
         self.env_steps.store(0, Ordering::Relaxed);
@@ -141,6 +147,8 @@ pub fn print_summary() {
     let mcts_sims = PROF.mcts_simulations.load(Ordering::Relaxed);
     let mcts_nodes = PROF.mcts_nodes_created.load(Ordering::Relaxed);
     let mcts_nn_evals = PROF.mcts_nn_evals.load(Ordering::Relaxed);
+    let mcts_nn_batches = PROF.mcts_nn_batches.load(Ordering::Relaxed);
+    let mcts_nn_positions = PROF.mcts_nn_positions.load(Ordering::Relaxed);
     let train_steps = PROF.train_steps.load(Ordering::Relaxed);
     let fd_forward_evals = PROF.fd_forward_evals.load(Ordering::Relaxed);
     let env_steps = PROF.env_steps.load(Ordering::Relaxed);
@@ -168,6 +176,8 @@ pub fn print_summary() {
     eprintln!("  MCTS simulations:    {:>12}", mcts_sims);
     eprintln!("  MCTS nodes created:  {:>12}", mcts_nodes);
     eprintln!("  MCTS NN evaluations: {:>12}", mcts_nn_evals);
+    eprintln!("  MCTS NN batches:     {:>12}", mcts_nn_batches);
+    eprintln!("  MCTS NN positions:   {:>12}", mcts_nn_positions);
     eprintln!("  Training steps:      {:>12}", train_steps);
     eprintln!("  FD forward evals:    {:>12}", fd_forward_evals);
     eprintln!("  Environment steps:   {:>12}", env_steps);
@@ -220,6 +230,18 @@ pub fn print_summary() {
     if mcts_nn_evals > 0 {
         let avg_nn_eval_us = (time_mcts_nn_eval_ns as f64 / mcts_nn_evals as f64) / 1000.0;
         eprintln!("  Avg NN eval time:     {:>10.1} us", avg_nn_eval_us);
+    }
+
+    // Average batch size (batched MCTS)
+    if mcts_nn_batches > 0 {
+        let avg_batch_size = mcts_nn_positions as f64 / mcts_nn_batches as f64;
+        eprintln!("  Avg NN batch size:    {:>10.2}", avg_batch_size);
+    }
+
+    // Positions per second (batched MCTS)
+    if time_mcts_nn_eval_ns > 0 && mcts_nn_positions > 0 {
+        let positions_per_sec = mcts_nn_positions as f64 / ns_to_sec(time_mcts_nn_eval_ns);
+        eprintln!("  NN positions/sec:     {:>10.0}", positions_per_sec);
     }
 
     // Training steps per second

@@ -49,6 +49,14 @@ struct Args {
     #[arg(long, default_value_t = 50)]
     mcts_sims: usize,
 
+    /// MCTS neural network batch size (for batched inference)
+    #[arg(long, default_value_t = 32)]
+    mcts_nn_batch_size: usize,
+
+    /// MCTS virtual loss for parallel path selection
+    #[arg(long, default_value_t = 1.0)]
+    mcts_virtual_loss: f32,
+
     /// Directory for saving checkpoints (required unless --no-checkpoints is set)
     #[arg(long, required_unless_present = "no_checkpoints")]
     checkpoint_dir: Option<PathBuf>,
@@ -123,6 +131,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     eprintln!("  Batch size: {}", config.batch_size);
     eprintln!("  MCTS simulations: {}", config.self_play.mcts_simulations);
+    eprintln!("  MCTS NN batch size: {}", args.mcts_nn_batch_size);
+    eprintln!("  MCTS virtual loss: {}", args.mcts_virtual_loss);
     eprintln!("  Replay buffer capacity: {}", config.replay_capacity);
     if let Some(ref dir) = config.checkpoint_dir {
         eprintln!("  Checkpoint directory: {dir:?}");
@@ -154,6 +164,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mcts_config = MctsConfig {
         num_simulations: config.self_play.mcts_simulations as u32,
+        nn_batch_size: args.mcts_nn_batch_size,
+        virtual_loss: args.mcts_virtual_loss,
         ..Default::default()
     };
     let agent = AlphaZeroMctsAgent::new(mcts_config, features, net);
