@@ -5,3 +5,7 @@
 .devenv/
 .devenv.flake.nix
 .direnv/
+
+# Runtime artifacts
+checkpoints/
+cargo-flamegraph.trace/
