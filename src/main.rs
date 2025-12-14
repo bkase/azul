@@ -144,7 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create environment
     let env_config = EnvConfig {
         num_players: config.num_players,
-        reward_scheme: RewardScheme::TerminalOnly,
+        reward_scheme: RewardScheme::DenseScoreDelta,
         include_full_state_in_step: true,
     };
     let features = BasicFeatureExtractor::new(config.num_players);

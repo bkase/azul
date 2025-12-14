@@ -12,6 +12,7 @@ azul-engine = { path = "../engine" }
 rand = "0.9"
 rand_distr = "0.5"
 mlx-rs = "0.25"
+rayon = "1.10"
 
 [dev-dependencies]
 rand = "0.9"

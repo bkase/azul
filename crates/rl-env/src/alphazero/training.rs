@@ -15,15 +15,43 @@ use mlx_rs::nn;
 use mlx_rs::optimizers::{Adam, Optimizer};
 use mlx_rs::transforms::eval_params;
 use mlx_rs::Array;
-use rand::Rng;
+use rand::{Rng, RngCore, SeedableRng};
+use rayon::prelude::*;
+use azul_engine::{DraftDestination, Phase};
 
 use super::{PendingMove, ReplayBuffer, TrainingExample};
-use crate::{ActionId, AgentInput, AzulEnv, Environment, FeatureExtractor, ACTION_SPACE_SIZE};
+use crate::{
+    ActionEncoder, ActionId, AgentInput, AzulEnv, Environment, FeatureExtractor,
+    ACTION_SPACE_SIZE,
+};
+use crate::mcts::InferenceSync;
 
 #[cfg(feature = "profiling")]
 use crate::profiling::{print_summary, Timer, PROF};
 #[cfg(feature = "profiling")]
 use std::sync::atomic::Ordering;
+
+/// Result of a single self-play game, including training examples and diagnostic stats.
+///
+/// This struct enables parallel self-play by encapsulating all information
+/// needed for both training and diagnostics in a single return value.
+#[derive(Clone, Debug)]
+pub struct SelfPlayResult {
+    /// Training examples generated from the game.
+    pub examples: Vec<TrainingExample>,
+
+    /// Number of moves that went to the floor.
+    pub floor_moves: usize,
+
+    /// True if the game was truncated (hit max_moves limit).
+    pub was_truncated: bool,
+
+    /// Final scores for each player.
+    pub final_scores: Vec<i16>,
+
+    /// Number of players in the game.
+    pub num_players: u8,
+}
 
 /// Output of an MCTS search at the root.
 #[derive(Clone, Debug)]
@@ -136,20 +164,40 @@ impl Default for TrainerConfig {
 
 /// Compute final outcomes from game scores.
 ///
-/// Uses same semantics as RewardScheme::TerminalOnly:
-/// z_i = (score_i - mean(scores)) / 100.0
+/// For **2-player** (the only mode supported by the current AlphaZero MCTS):
+/// - `z_0 = clamp((score_0 - score_1) / 20.0, -1.0, 1.0)`
+/// - `z_1 = -z_0`
 ///
-/// Returns values in approximately [-1, 1] range.
+/// For **3–4 player** games (future work), we keep a mean-centered shaping:
+/// - `z_i = clamp((score_i - mean(scores)) / 20.0, -1.0, 1.0)`
+///
+/// The divisor of 20.0 (instead of 100.0) provides stronger gradient signal.
+/// A typical Azul game is decided by ~10-20 points, so dividing by 100
+/// would squash the signal too much (e.g., a 5-point lead becomes 0.05).
+/// With 20.0, a 10-point lead becomes 0.5, which is a meaningful signal.
+///
+/// Returns values clamped to [-1, 1] range.
 pub fn compute_outcomes_from_scores(scores: &[i16]) -> Vec<f32> {
     let n = scores.len();
     if n == 0 {
         return Vec::new();
     }
 
+    // 2-player: use explicit score difference for a true zero-sum target.
+    // This matches MCTS terminal evaluation and yields a stronger value signal.
+    if n == 2 {
+        let diff = (scores[0] as f32) - (scores[1] as f32);
+        let v0 = (diff / 20.0).clamp(-1.0, 1.0);
+        return vec![v0, -v0];
+    }
+
+    // 3–4 player: mean-centered shaping (sum ~= 0), clamped to [-1, 1].
     let scores_f: Vec<f32> = scores.iter().map(|s| *s as f32).collect();
     let mean = scores_f.iter().sum::<f32>() / (n as f32);
-
-    scores_f.into_iter().map(|s| (s - mean) / 100.0).collect()
+    scores_f
+        .into_iter()
+        .map(|s| ((s - mean) / 20.0).clamp(-1.0, 1.0))
+        .collect()
 }
 
 /// Build training batch arrays from a slice of training examples.
@@ -214,16 +262,19 @@ pub trait TrainableModel {
     fn load(&mut self, path: &std::path::Path) -> std::io::Result<()>;
 }
 
-/// Run a single self-play game and return training examples.
+/// Run a single self-play game and return training examples with diagnostic stats.
 ///
 /// Uses the MCTS agent to play against itself, recording (observation, policy, value)
 /// tuples for each move. The value is backfilled with the final game outcome.
+///
+/// Returns a `SelfPlayResult` containing both the training examples and game statistics
+/// needed for monitoring training progress.
 pub fn self_play_game<F, A>(
     env: &mut AzulEnv<F>,
     agent: &mut A,
     self_play_cfg: &SelfPlayConfig,
     rng: &mut impl Rng,
-) -> Vec<TrainingExample>
+) -> SelfPlayResult
 where
     F: FeatureExtractor,
     A: MctsAgentExt,
@@ -235,13 +286,14 @@ where
 
     // 2. Play game
     while !step.done && move_idx < self_play_cfg.max_moves {
-        let p = step.current_player as usize;
+        let acting_player = step.current_player;
+        let p = acting_player as usize;
 
         // Build AgentInput (with full state if available)
         let input = AgentInput {
             observation: &step.observations[p],
             legal_action_mask: &step.legal_action_mask,
-            current_player: step.current_player,
+            current_player: acting_player,
             state: step.state.as_ref(),
         };
 
@@ -255,17 +307,36 @@ where
         // Select action + policy via MCTS
         let search_result = agent.select_action_and_policy(&input, temperature, rng);
 
-        // Record pending move
-        moves.push(PendingMove {
-            player: step.current_player,
-            observation: step.observations[p].clone(),
-            policy: search_result.policy.clone(),
-        });
-
         // Step env
         let next = env
             .step(search_result.action, rng)
             .expect("env::step should not fail for legal action");
+
+        // Dense, zero-sum reward from acting player's perspective.
+        //
+        // AzulEnv emits per-player score deltas; we convert that to a 2-player
+        // zero-sum signal by subtracting the opponent's delta and normalizing.
+        //
+        // This reward corresponds to a *change* in score difference, so the
+        // value targets represent "remaining advantage" (terminal value = 0).
+        let n = env.game_state.num_players as usize;
+        let reward = if n == 2 {
+            let opp = 1 - p;
+            (next.rewards[p] - next.rewards[opp]) / 20.0
+        } else {
+            let mean = next.rewards[0..n].iter().sum::<f32>() / (n as f32);
+            (next.rewards[p] - mean) / 20.0
+        };
+
+        // Record pending move (now that we know the transition reward).
+        moves.push(PendingMove {
+            player: acting_player,
+            observation: step.observations[p].clone(),
+            policy: search_result.policy.clone(),
+            action: search_result.action,
+            reward,
+        });
+
         step = next;
         move_idx += 1;
 
@@ -273,26 +344,74 @@ where
         PROF.env_steps.fetch_add(1, Ordering::Relaxed);
     }
 
-    // 3. Extract final scores & compute z per player
-    let n = env.game_state.num_players as usize;
-    let scores: Vec<i16> = (0..n).map(|p| env.game_state.players[p].score).collect();
-    let outcomes = compute_outcomes_from_scores(&scores);
+    // 3. Extract final state info for diagnostics
+    let num_players = env.game_state.num_players;
+    let n = num_players as usize;
+    let final_scores: Vec<i16> = (0..n).map(|p| env.game_state.players[p].score).collect();
+    let was_truncated = env.game_state.phase != Phase::GameOver;
 
-    // 4. Convert PendingMove -> TrainingExample
+    // 4. Compute discounted returns for each pending move (terminal value = 0).
+    //
+    // IMPORTANT: Our per-step reward is defined as the *change* in normalized
+    // score difference (from the acting player's perspective). Therefore, the
+    // value target represents the expected *remaining* advantage from that
+    // state, not the absolute final score difference.
+    let mut values = vec![0.0f32; moves.len()];
+    let mut next_value = 0.0f32;
+    let mut next_player: Option<u8> = None;
+
+    for i in (0..moves.len()).rev() {
+        let player = moves[i].player;
+        let continuation = match next_player {
+            None => 0.0,
+            Some(np) if np == player => next_value,
+            Some(_) => -next_value,
+        };
+
+        let v = (moves[i].reward + continuation).clamp(-1.0, 1.0);
+        values[i] = v;
+        next_value = v;
+        next_player = Some(player);
+    }
+
+    // Keep terminal score outcomes for diagnostics/logging.
+    let _outcomes = compute_outcomes_from_scores(&final_scores);
+
+    // 5. Count floor moves and convert PendingMove -> TrainingExample
+    let mut floor_moves = 0usize;
+
     // Force evaluation of observations before storing in replay buffer.
     // MLX arrays are lazy - without eval(), the underlying event/stream tracking
     // can become invalid when arrays are stored for a long time.
-    moves
+    let examples: Vec<TrainingExample> = moves
         .into_iter()
-        .map(|m| {
+        .zip(values.into_iter())
+        .map(|(m, value)| {
+            // Count floor moves
+            if matches!(
+                ActionEncoder::decode(m.action).dest,
+                DraftDestination::Floor
+            ) {
+                floor_moves += 1;
+            }
+
             m.observation.eval().expect("Failed to evaluate observation");
             TrainingExample {
                 observation: m.observation,
                 policy: m.policy,
-                value: outcomes[m.player as usize],
+                action: m.action,
+                value,
             }
         })
-        .collect()
+        .collect();
+
+    SelfPlayResult {
+        examples,
+        floor_moves,
+        was_truncated,
+        final_scores,
+        num_players,
+    }
 }
 
 /// Extension trait for MCTS agents that can return both action and policy.
@@ -333,8 +452,8 @@ where
 
 impl<F, M> Trainer<F, M>
 where
-    F: FeatureExtractor + Clone,
-    M: TrainableModel + MctsAgentExt + ModuleParameters,
+    F: FeatureExtractor + Clone + Send,
+    M: TrainableModel + MctsAgentExt + ModuleParameters + Clone + Send + InferenceSync,
 {
     /// Create a new trainer with the given components.
     pub fn new(env: AzulEnv<F>, agent: M, cfg: TrainerConfig, rng: rand::rngs::StdRng) -> Self {
@@ -353,26 +472,88 @@ where
     /// Run the main training loop.
     pub fn run(&mut self) -> Result<(), TrainingError> {
         for iter in self.cfg.start_iter..self.cfg.num_iters {
-            // 1. Self-play
+            // 1. Self-play (parallelized with deterministic seeding)
             #[cfg(feature = "profiling")]
             let _t_sp = Timer::new(&PROF.time_self_play_ns);
 
-            for _ in 0..self.cfg.self_play_games_per_iter {
-                let examples = self_play_game(
-                    &mut self.env,
-                    &mut self.agent,
-                    &self.cfg.self_play,
-                    &mut self.rng,
-                );
+            // Generate deterministic seeds and pre-create all game setups.
+            // This ensures reproducibility: the same main RNG seed will always
+            // produce the same sequence of game seeds, regardless of thread scheduling.
+            //
+            // We pre-create all clones here (sequential) because MLX arrays contain
+            // raw pointers that aren't Sync. By moving ownership into each parallel
+            // task, we avoid the need for shared references.
+            let self_play_cfg = self.cfg.self_play.clone();
+            // Sync inference worker to latest weights before parallel games.
+            self.agent.sync_inference_backend();
+            let game_setups: Vec<(u64, AzulEnv<F>, M)> = (0..self.cfg.self_play_games_per_iter)
+                .map(|_| {
+                    let seed = self.rng.next_u64();
+                    (seed, self.env.clone(), self.agent.clone())
+                })
+                .collect();
+
+            // Run games in parallel using rayon - each task owns its env/agent
+            let results: Vec<SelfPlayResult> = game_setups
+                .into_par_iter()
+                .map(|(seed, mut local_env, mut local_agent)| {
+                    // Create a thread-local RNG seeded deterministically
+                    let mut local_rng = rand::rngs::StdRng::seed_from_u64(seed);
+
+                    self_play_game(&mut local_env, &mut local_agent, &self_play_cfg, &mut local_rng)
+                })
+                .collect();
+
+            // Aggregate results into diagnostics and replay buffer
+            let mut sp_games = 0usize;
+            let mut sp_moves = 0usize;
+            let mut sp_floor_moves = 0usize;
+            let mut sp_truncated_games = 0usize;
+            let mut sp_ties = 0usize;
+            let mut sp_zero_zero_games = 0usize;
+            let mut sp_score_diff_sum = 0.0f32;
+            let mut sp_abs_score_diff_sum = 0.0f32;
+            let mut sp_abs_z_sum = 0.0f32;
+
+            for result in results {
+                sp_games += 1;
+                sp_moves += result.examples.len();
+                sp_floor_moves += result.floor_moves;
+
+                if result.was_truncated {
+                    sp_truncated_games += 1;
+                }
+
+                let n = result.num_players as usize;
+                if n == 2 && result.final_scores.len() >= 2 {
+                    let s0 = result.final_scores[0];
+                    let s1 = result.final_scores[1];
+                    let diff = (s0 - s1) as f32;
+                    sp_score_diff_sum += diff;
+                    sp_abs_score_diff_sum += diff.abs();
+                    if s0 == s1 {
+                        sp_ties += 1;
+                    }
+                    if s0 == 0 && s1 == 0 {
+                        sp_zero_zero_games += 1;
+                    }
+                }
+
+                let outcomes = compute_outcomes_from_scores(&result.final_scores);
+                if !outcomes.is_empty() {
+                    let mean_abs_z =
+                        outcomes.iter().map(|z| z.abs()).sum::<f32>() / outcomes.len() as f32;
+                    sp_abs_z_sum += mean_abs_z;
+                }
 
                 #[cfg(feature = "profiling")]
                 {
                     PROF.self_play_games.fetch_add(1, Ordering::Relaxed);
                     PROF.self_play_moves
-                        .fetch_add(examples.len() as u64, Ordering::Relaxed);
+                        .fetch_add(result.examples.len() as u64, Ordering::Relaxed);
                 }
 
-                self.replay.extend(examples);
+                self.replay.extend(result.examples);
             }
 
             // Drop timer to record self-play time before training starts
@@ -382,6 +563,9 @@ where
             // 2. Training
             #[cfg(feature = "profiling")]
             let _t_train = Timer::new(&PROF.time_training_ns);
+
+            let mut total_loss = 0.0f32;
+            let mut train_steps = 0usize;
 
             for _ in 0..self.cfg.training_steps_per_iter {
                 if self.replay.len() < self.cfg.batch_size {
@@ -399,7 +583,9 @@ where
                     .cloned()
                     .collect();
                 let batch_refs: Vec<&TrainingExample> = batch.iter().collect();
-                let _loss = self.training_step(&batch_refs)?;
+                let loss = self.training_step(&batch_refs)?;
+                total_loss += loss;
+                train_steps += 1;
             }
 
             // Drop timer to record training time
@@ -413,13 +599,48 @@ where
                 }
             }
 
-            // Log progress
+            // Log progress with loss information
             if iter % 10 == 0 {
+                let avg_loss = if train_steps > 0 {
+                    total_loss / train_steps as f32
+                } else {
+                    0.0
+                };
+
+                let sp_games_f = sp_games.max(1) as f32;
+                let moves_per_game = sp_moves as f32 / sp_games_f;
+                let floor_pct = if sp_moves > 0 {
+                    100.0 * (sp_floor_moves as f32) / (sp_moves as f32)
+                } else {
+                    0.0
+                };
+                let trunc_pct = 100.0 * (sp_truncated_games as f32) / sp_games_f;
+                let abs_z = sp_abs_z_sum / sp_games_f;
+
+                let two_player_stats = if self.cfg.num_players == 2 {
+                    let mean_diff = sp_score_diff_sum / sp_games_f;
+                    let mean_abs_diff = sp_abs_score_diff_sum / sp_games_f;
+                    let tie_pct = 100.0 * (sp_ties as f32) / sp_games_f;
+                    let zero_zero_pct = 100.0 * (sp_zero_zero_games as f32) / sp_games_f;
+                    format!(
+                        " diff={:+.2} |diff|={:.2} ties={:.1}% 0-0={:.1}%",
+                        mean_diff, mean_abs_diff, tie_pct, zero_zero_pct
+                    )
+                } else {
+                    String::new()
+                };
+
                 eprintln!(
-                    "Iteration {}/{}, replay buffer size: {}",
+                    "Iter {}/{} | replay: {} | loss: {:.4} | sp: moves/g={:.1} floor={:.1}% |z|={:.3} trunc={:.1}%{}",
                     iter,
                     self.cfg.num_iters,
-                    self.replay.len()
+                    self.replay.len(),
+                    avg_loss,
+                    moves_per_game,
+                    floor_pct,
+                    abs_z,
+                    trunc_pct,
+                    two_player_stats
                 );
             }
         }
@@ -557,10 +778,31 @@ mod tests {
             "Lower score player should have negative outcome"
         );
 
-        // Check values
-        // mean = 15, so outcomes = [(10-15)/100, (20-15)/100] = [-0.05, 0.05]
-        assert!((outcomes[0] - (-0.05)).abs() < 1e-5);
-        assert!((outcomes[1] - 0.05).abs() < 1e-5);
+        // 2-player uses score difference scaling:
+        // diff = -10, so outcomes = [-10/20, +10/20] = [-0.5, 0.5]
+        assert!((outcomes[0] - (-0.5)).abs() < 1e-5);
+        assert!((outcomes[1] - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_compute_outcomes_clamps_extreme_values() {
+        // Test that extreme score differences are clamped to [-1, 1]
+        let scores = [0i16, 100i16]; // 100 point difference
+        let outcomes = compute_outcomes_from_scores(&scores);
+
+        // mean = 50, raw outcomes would be [-2.5, 2.5] but should clamp
+        assert!(
+            outcomes[0] >= -1.0 && outcomes[0] <= 1.0,
+            "Outcome should be clamped to [-1, 1], got {}",
+            outcomes[0]
+        );
+        assert!(
+            outcomes[1] >= -1.0 && outcomes[1] <= 1.0,
+            "Outcome should be clamped to [-1, 1], got {}",
+            outcomes[1]
+        );
+        assert_eq!(outcomes[0], -1.0, "Loser should be clamped to -1");
+        assert_eq!(outcomes[1], 1.0, "Winner should be clamped to 1");
     }
 
     #[test]
@@ -588,6 +830,7 @@ mod tests {
             .map(|i| TrainingExample {
                 observation: Array::zeros::<f32>(&[obs_size]).unwrap(),
                 policy: vec![1.0 / ACTION_SPACE_SIZE as f32; ACTION_SPACE_SIZE],
+                action: 0,
                 value: i as f32 * 0.1,
             })
             .collect();
@@ -643,6 +886,7 @@ mod tests {
     }
 
     /// Stub PolicyValueNet for testing that returns uniform policy and zero value.
+    #[derive(Clone, Copy)]
     pub struct StubPolicyValueModel;
 
     impl StubPolicyValueModel {
@@ -713,6 +957,21 @@ mod tests {
         pub dummy_weight: mlx_rs::module::Param<Array>,
     }
 
+    impl Clone for StubMctsAgent {
+        fn clone(&self) -> Self {
+            Self {
+                agent: self.agent.clone(),
+                dummy_weight: mlx_rs::module::Param::new(Array::zeros::<f32>(&[10]).unwrap()),
+            }
+        }
+    }
+
+    // SAFETY: StubMctsAgent is only used in tests which run with RAYON_NUM_THREADS=1
+    // effectively making parallelization sequential. The MLX arrays inside aren't
+    // actually shared between threads.
+    unsafe impl Send for StubMctsAgent {}
+    unsafe impl Sync for StubMctsAgent {}
+
     impl StubMctsAgent {
         pub fn new(num_players: u8, num_simulations: u32) -> Self {
             let features = crate::BasicFeatureExtractor::new(num_players);
@@ -729,6 +988,12 @@ mod tests {
                 agent,
                 dummy_weight,
             }
+        }
+    }
+
+    impl crate::mcts::InferenceSync for StubMctsAgent {
+        fn sync_inference_backend(&self) {
+            // Nothing to sync; stub model deterministic.
         }
     }
 
@@ -838,15 +1103,15 @@ mod tests {
         };
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let examples = self_play_game(&mut env, &mut agent, &self_play_cfg, &mut rng);
+        let result = self_play_game(&mut env, &mut agent, &self_play_cfg, &mut rng);
 
         // Should have generated at least one example
         assert!(
-            !examples.is_empty(),
+            !result.examples.is_empty(),
             "Should generate at least one training example"
         );
 
-        for ex in &examples {
+        for ex in &result.examples {
             // Each policy should have correct length
             assert_eq!(
                 ex.policy.len(),
@@ -892,12 +1157,12 @@ mod tests {
         };
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let examples = self_play_game(&mut env, &mut agent, &self_play_cfg, &mut rng);
+        let result = self_play_game(&mut env, &mut agent, &self_play_cfg, &mut rng);
 
         assert!(
-            examples.len() <= 5,
+            result.examples.len() <= 5,
             "Should respect max_moves limit, got {} examples",
-            examples.len()
+            result.examples.len()
         );
     }
 
@@ -923,7 +1188,7 @@ mod tests {
         };
 
         let mut rng1 = rand::rngs::StdRng::seed_from_u64(42);
-        let examples1 = self_play_game(&mut env1, &mut agent1, &self_play_cfg, &mut rng1);
+        let result1 = self_play_game(&mut env1, &mut agent1, &self_play_cfg, &mut rng1);
 
         // Run 2 with same seed
         let features2 = BasicFeatureExtractor::new(2);
@@ -931,17 +1196,17 @@ mod tests {
         let mut agent2 = StubMctsAgent::new(2, 4);
 
         let mut rng2 = rand::rngs::StdRng::seed_from_u64(42);
-        let examples2 = self_play_game(&mut env2, &mut agent2, &self_play_cfg, &mut rng2);
+        let result2 = self_play_game(&mut env2, &mut agent2, &self_play_cfg, &mut rng2);
 
         // Should produce same number of examples
         assert_eq!(
-            examples1.len(),
-            examples2.len(),
+            result1.examples.len(),
+            result2.examples.len(),
             "Should produce same number of examples"
         );
 
         // Each example should have same value
-        for (ex1, ex2) in examples1.iter().zip(examples2.iter()) {
+        for (ex1, ex2) in result1.examples.iter().zip(result2.examples.iter()) {
             assert!(
                 (ex1.value - ex2.value).abs() < 1e-6,
                 "Values should match: {} vs {}",
@@ -964,6 +1229,7 @@ mod tests {
                 TrainingExample {
                     observation: Array::zeros::<f32>(&[obs_size]).unwrap(),
                     policy,
+                    action: (i % ACTION_SPACE_SIZE) as u16,
                     value: if i == 0 { 0.5 } else { -0.5 },
                 }
             })
@@ -1171,6 +1437,145 @@ mod tests {
             trainer.replay.len(),
             0,
             "Replay buffer should be empty when start_iter == num_iters"
+        );
+    }
+
+    /// Sanity test: Verify the network can overfit on a single batch.
+    ///
+    /// This test trains the network on a single batch of data repeatedly.
+    /// If the loss doesn't drop and the network doesn't learn the target,
+    /// there's a fundamental problem with the gradient flow or network definition.
+    ///
+    /// This is a critical debugging tool for RL training issues.
+    #[test]
+    fn test_sanity_can_overfit_single_batch() {
+        use crate::{AlphaZeroNet, ACTION_SPACE_SIZE};
+        use mlx_rs::module::ModuleParameters;
+        use mlx_rs::optimizers::{Adam, Optimizer};
+        use mlx_rs::transforms::eval_params;
+
+        // 1. Setup - small network for speed
+        let obs_size = 50;
+        let hidden_size = 32;
+        let mut net = AlphaZeroNet::new(obs_size, hidden_size);
+        let mut optimizer = Adam::new(0.01); // High LR for fast convergence
+
+        // 2. Create a fake batch with clear targets
+        let batch_size = 8;
+
+        // Fake observations (zeros)
+        let obs = Array::zeros::<f32>(&[batch_size, obs_size as i32]).unwrap();
+
+        // Fake policy targets: Action 0 has 100% probability
+        let mut target_policy_data = vec![0.0f32; batch_size as usize * ACTION_SPACE_SIZE];
+        for i in 0..batch_size as usize {
+            target_policy_data[i * ACTION_SPACE_SIZE] = 1.0; // One-hot on action 0
+        }
+        let pi_target =
+            Array::from_slice(&target_policy_data, &[batch_size, ACTION_SPACE_SIZE as i32]);
+
+        // Fake value targets: All 1.0 (win)
+        let z_target = Array::from_slice(&vec![1.0f32; batch_size as usize], &[batch_size]);
+
+        // 3. Get initial predictions to compare
+        let (_, initial_values) = net.forward_batch(&obs);
+        let initial_val = initial_values.as_slice::<f32>()[0];
+
+        // 4. Training loop - overfit on this single batch
+        let mut losses = Vec::new();
+        let num_steps = 200;
+
+        for step in 0..num_steps {
+            // Define loss function matching training.rs
+            let policy_weight = Array::from_slice(&[1.0f32], &[1]);
+            let value_weight = Array::from_slice(&[1.0f32], &[1]);
+
+            let loss_fn =
+                |model: &mut AlphaZeroNet, (x, pi, z): (&Array, &Array, &Array)| {
+                    let (policy_logits, value_pred) = model.forward_batch(x);
+
+                    // Policy loss: cross-entropy
+                    let policy_loss = cross_entropy_loss_array(&policy_logits, pi)?;
+
+                    // Value loss: MSE
+                    let value_loss = mse_loss_array(&value_pred, z)?;
+
+                    // Total weighted loss
+                    let total_loss = policy_loss
+                        .multiply(&policy_weight)?
+                        .add(&value_loss.multiply(&value_weight)?)?
+                        .squeeze()?;
+
+                    Ok(total_loss)
+                };
+
+            // Compute value and gradients
+            let mut vg = mlx_rs::nn::value_and_grad(loss_fn);
+            let (loss, grads) = vg(&mut net, (&obs, &pi_target, &z_target)).unwrap();
+            let loss_val = loss.item::<f32>();
+
+            // Apply gradients
+            optimizer.update(&mut net, grads).unwrap();
+            let _ = eval_params(ModuleParameters::parameters(&net));
+
+            losses.push(loss_val);
+
+            if step % 50 == 0 {
+                eprintln!("Overfit test step {}: loss = {:.6}", step, loss_val);
+            }
+        }
+
+        // 5. Verify the network learned
+        let (final_policy, final_values) = net.forward_batch(&obs);
+        let final_val = final_values.as_slice::<f32>()[0];
+        let final_policy_slice = final_policy.as_slice::<f32>();
+
+        // Value should be close to target (1.0)
+        eprintln!(
+            "Initial value: {:.4}, Final value: {:.4} (target: 1.0)",
+            initial_val, final_val
+        );
+        assert!(
+            final_val > 0.8,
+            "Network should learn to predict value ~1.0, got {:.4}. \
+             This indicates the value head is not receiving gradients correctly.",
+            final_val
+        );
+
+        // Policy should heavily favor action 0
+        let action0_prob = {
+            // Softmax to get probabilities
+            let logits = &final_policy_slice[0..ACTION_SPACE_SIZE];
+            let max_logit = logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+            let exps: Vec<f32> = logits.iter().map(|l| (l - max_logit).exp()).collect();
+            let sum: f32 = exps.iter().sum();
+            exps[0] / sum
+        };
+
+        eprintln!(
+            "Action 0 probability: {:.4} (target: 1.0)",
+            action0_prob
+        );
+        assert!(
+            action0_prob > 0.8,
+            "Network should learn to assign high probability to action 0, got {:.4}. \
+             This indicates the policy head is not receiving gradients correctly.",
+            action0_prob
+        );
+
+        // Loss should have decreased significantly
+        let initial_loss = losses[0];
+        let final_loss = *losses.last().unwrap();
+        eprintln!(
+            "Initial loss: {:.6}, Final loss: {:.6}",
+            initial_loss, final_loss
+        );
+        assert!(
+            final_loss < initial_loss * 0.1,
+            "Loss should decrease by at least 10x when overfitting, \
+             initial: {:.6}, final: {:.6}",
+            initial_loss,
+            final_loss
         );
     }
 }

@@ -11,6 +11,8 @@ use mlx_rs::Array;
 use rand::Rng;
 use rand_distr::{Distribution, Gamma};
 use std::collections::HashMap;
+use std::sync::mpsc;
+use std::thread;
 
 use crate::{
     ActionEncoder, ActionId, Agent, AgentInput, FeatureExtractor, Observation, ACTION_SPACE_SIZE,
@@ -54,6 +56,83 @@ pub trait PolicyValueNet {
     /// - policy_logits: [batch, ACTION_SPACE_SIZE]
     /// - values: [batch]
     fn predict_batch(&mut self, obs_batch: &Array) -> (Array, Array);
+}
+
+/// Optional hook for keeping a dedicated inference backend in sync.
+pub trait InferenceSync {
+    fn sync_inference_backend(&self);
+}
+
+/// Dedicated single-threaded inference worker to keep MLX/Metal usage serialized.
+struct InferenceWorker<N>
+where
+    N: PolicyValueNet + Send + Clone + 'static,
+{
+    tx: mpsc::Sender<WorkerMsg<N>>,
+}
+
+enum WorkerMsg<N>
+where
+    N: PolicyValueNet + Send + Clone + 'static,
+{
+    Infer {
+        obs: Vec<f32>,
+        batch: usize,
+        obs_size: usize,
+        reply: mpsc::SyncSender<(Vec<f32>, Vec<f32>)>,
+    },
+    UpdateNet(N),
+}
+
+impl<N> InferenceWorker<N>
+where
+    N: PolicyValueNet + Send + Clone + 'static,
+{
+    fn new(mut net: N) -> Self {
+        let (tx, rx) = mpsc::channel::<WorkerMsg<N>>();
+        thread::spawn(move || {
+            while let Ok(msg) = rx.recv() {
+                match msg {
+                    WorkerMsg::Infer {
+                        obs,
+                        batch,
+                        obs_size,
+                        reply,
+                    } => {
+                        let obs_batch =
+                            Array::from_slice(&obs, &[batch as i32, obs_size as i32]);
+                        let (policy, values) = net.predict_batch(&obs_batch);
+                        let _ = reply.send((
+                            policy.as_slice::<f32>().to_vec(),
+                            values.as_slice::<f32>().to_vec(),
+                        ));
+                    }
+                    WorkerMsg::UpdateNet(new_net) => {
+                        net = new_net;
+                    }
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    fn infer(&self, obs: Vec<f32>, batch: usize, obs_size: usize) -> (Vec<f32>, Vec<f32>) {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(WorkerMsg::Infer {
+                obs,
+                batch,
+                obs_size,
+                reply: reply_tx,
+            })
+            .expect("Inference worker channel closed");
+        reply_rx.recv().expect("Inference worker dropped")
+    }
+
+    fn update_net(&self, net: N) {
+        // Best-effort; if worker has shut down, let it panic upstream.
+        let _ = self.tx.send(WorkerMsg::UpdateNet(net));
+    }
 }
 
 /// Configuration for AlphaZero-style MCTS.
@@ -114,6 +193,9 @@ pub struct ChildEdge {
     pub prior: f32,             // P(s, a)
     pub visit_count: u32,       // N(s, a)
     pub value_sum: f32,         // W(s, a), sum of backed-up values
+    /// Immediate reward for this transition, from the parent node's perspective.
+    /// Populated the first time the edge is expanded (child is created).
+    pub reward: f32,
     pub child: Option<NodeIdx>, // None until first expansion along this edge
     /// True if this edge has a pending expansion in the current batch.
     /// Used to prevent multiple simulations from selecting the same unexpanded edge.
@@ -166,27 +248,54 @@ struct PendingSim {
 }
 
 /// AlphaZero MCTS Agent that performs tree search guided by a neural network.
+///
+/// Clone is implemented to support parallel self-play games.
+/// Each cloned agent maintains independent state (though the underlying neural
+/// network weights are shared via MLX's copy-on-write semantics).
 pub struct AlphaZeroMctsAgent<F, N>
 where
     F: FeatureExtractor,
-    N: PolicyValueNet,
+    N: PolicyValueNet + Send + Clone + 'static,
 {
     pub config: MctsConfig,
     pub features: F,
     pub net: N,
+    inference: std::sync::Arc<InferenceWorker<N>>,
+}
+
+impl<F, N> Clone for AlphaZeroMctsAgent<F, N>
+where
+    F: FeatureExtractor + Clone,
+    N: PolicyValueNet + Clone + Send + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            features: self.features.clone(),
+            net: self.net.clone(),
+            inference: self.inference.clone(),
+        }
+    }
 }
 
 impl<F, N> AlphaZeroMctsAgent<F, N>
 where
     F: FeatureExtractor,
-    N: PolicyValueNet,
+    N: PolicyValueNet + Send + Clone + 'static,
 {
     pub fn new(config: MctsConfig, features: F, net: N) -> Self {
+        let inference = std::sync::Arc::new(InferenceWorker::new(net.clone()));
         Self {
             config,
             features,
             net,
+            inference,
         }
+    }
+
+    /// Refresh the inference worker with current network weights.
+    pub fn sync_inference_backend(&self) {
+        self.inference.update_net(self.net.clone());
     }
 
     /// Create a lightweight stub node without NN evaluation.
@@ -248,6 +357,7 @@ where
                 prior,
                 visit_count: 0,
                 value_sum: 0.0,
+                reward: 0.0,
                 child: None,
                 pending: false,
             })
@@ -296,17 +406,37 @@ where
             }
 
             // Expand edge by creating child stub node
-            let parent_state = tree.nodes[current_idx as usize].state.clone();
-            let action_id = tree.nodes[current_idx as usize].children[child_idx].action_id;
+            let (parent_state, parent_to_play, action_id, my_before, opp_before) = {
+                let parent = &tree.nodes[current_idx as usize];
+                let parent_to_play = parent.to_play;
+                let n = parent.state.num_players as usize;
+                debug_assert!(
+                    n == 2,
+                    "AlphaZeroMctsAgent v1 only supports 2 players, got {n}"
+                );
+                let my_before = parent.state.players[parent_to_play as usize].score as f32;
+                let opp_before = parent.state.players[1 - parent_to_play as usize].score as f32;
+                let action_id = parent.children[child_idx].action_id;
+                (parent.state.clone(), parent_to_play, action_id, my_before, opp_before)
+            };
             let action = ActionEncoder::decode(action_id);
 
             let step_result = apply_action(parent_state, action, rng)
                 .expect("MCTS should only expand legal actions");
 
+            // Immediate reward from parent perspective: Δ(score_diff)/20.
+            let my_after = step_result.state.players[parent_to_play as usize].score as f32;
+            let opp_after = step_result.state.players[1 - parent_to_play as usize].score as f32;
+            let reward = ((my_after - my_before) - (opp_after - opp_before)) / 20.0;
+
             let new_idx = self.create_node_stub(tree, step_result.state);
-            tree.nodes[current_idx as usize].children[child_idx].child = Some(new_idx);
-            // Mark edge as pending to prevent other simulations from selecting same leaf
-            tree.nodes[current_idx as usize].children[child_idx].pending = true;
+            {
+                let edge = &mut tree.nodes[current_idx as usize].children[child_idx];
+                edge.child = Some(new_idx);
+                edge.reward = reward;
+                // Mark edge as pending to prevent other simulations from selecting same leaf
+                edge.pending = true;
+            }
 
             current_idx = new_idx;
             break;
@@ -362,10 +492,8 @@ where
                 obs_scratch.extend_from_slice(obs.as_slice::<f32>());
             }
 
-            let obs_batch = Array::from_slice(obs_scratch, &[b as i32, obs_size as i32]);
-
-            // NN inference with profiling
-            let (policy_logits_batch, values_batch) = {
+            // NN inference with profiling, executed on the dedicated worker thread.
+            let (logits_vec, values_vec) = {
                 #[cfg(feature = "profiling")]
                 let _t = Timer::new(&PROF.time_mcts_nn_eval_ns);
                 #[cfg(feature = "profiling")]
@@ -373,11 +501,11 @@ where
                     PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
                     PROF.mcts_nn_positions.fetch_add(b as u64, Ordering::Relaxed);
                 }
-                self.net.predict_batch(&obs_batch)
+                self.inference
+                    .infer(obs_scratch.clone(), b, obs_size)
             };
-
-            let logits = policy_logits_batch.as_slice::<f32>();
-            let values = values_batch.as_slice::<f32>();
+            let logits = &logits_vec;
+            let values = &values_vec;
 
             // 3) Expand each unique leaf using its logits row, and store leaf value
             for (slot, &node_idx) in unique_leafs.iter().enumerate() {
@@ -433,9 +561,7 @@ where
             let root = &tree.nodes[root_idx as usize];
             let obs = self.features.encode(&root.state, root.to_play);
             let obs_data = obs.as_slice::<f32>().to_vec();
-            let obs_batch = Array::from_slice(&obs_data, &[1, obs_size as i32]);
-
-            let (policy_logits_batch, values_batch) = {
+            let (logits_vec, values_vec) = {
                 #[cfg(feature = "profiling")]
                 let _t = Timer::new(&PROF.time_mcts_nn_eval_ns);
                 #[cfg(feature = "profiling")]
@@ -443,14 +569,11 @@ where
                     PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
                     PROF.mcts_nn_positions.fetch_add(1, Ordering::Relaxed);
                 }
-                self.net.predict_batch(&obs_batch)
+                self.inference.infer(obs_data, 1, obs_size)
             };
 
-            let logits = policy_logits_batch.as_slice::<f32>();
-            let values = values_batch.as_slice::<f32>();
-
-            let logits_row = &logits[0..ACTION_SPACE_SIZE];
-            let value = values[0];
+            let logits_row = &logits_vec[0..ACTION_SPACE_SIZE];
+            let value = values_vec[0];
 
             self.expand_node_from_nn(&mut tree, root_idx, logits_row, value);
         }
@@ -508,6 +631,16 @@ where
         }
 
         apply_temperature(&counts, self.config.temperature)
+    }
+}
+
+impl<F, N> InferenceSync for AlphaZeroMctsAgent<F, N>
+where
+    F: FeatureExtractor,
+    N: PolicyValueNet + Send + Clone + 'static,
+{
+    fn sync_inference_backend(&self) {
+        self.inference.update_net(self.net.clone());
     }
 }
 
@@ -576,36 +709,53 @@ fn revert_virtual_loss(tree: &mut MctsTree, step: &PathStep, vloss: f32) {
 
 /// Backup with virtual loss: first revert virtual loss, then apply real backup.
 fn backup_with_virtual_loss(tree: &mut MctsTree, path: &[PathStep], leaf_value: f32, vloss: f32) {
+    // Value is always interpreted as "from the perspective of to_play at the
+    // current node in the traversal".
+    //
+    // Azul does *not* guarantee strict alternation of turns across all moves
+    // (the first-player marker can cause the same player to act twice across
+    // the round boundary). Therefore we must only negate when the player to
+    // move changes between parent and child.
     let mut value = leaf_value;
 
     for step in path.iter().rev() {
-        // Remove virtual loss for this in-flight sim
+        // Remove virtual loss for this in-flight sim.
         revert_virtual_loss(tree, step, vloss);
 
-        // Apply real backup
+        // Read parent/child to_play without holding a mutable borrow.
+        let (parent_to_play, child_to_play, reward) = {
+            let parent = &tree.nodes[step.node_idx as usize];
+            let edge = &parent.children[step.child_idx];
+            let child_idx = edge
+                .child
+                .expect("backup path must reference an expanded child node");
+            (parent.to_play, tree.nodes[child_idx as usize].to_play, edge.reward)
+        };
+
+        // Transform from child perspective -> parent perspective.
+        if parent_to_play != child_to_play {
+            value = -value;
+        }
+
+        // Include dense reward on this edge.
+        value = (reward + value).clamp(-1.0, 1.0);
+
+        // Apply real backup (value is now from parent perspective).
         let node = &mut tree.nodes[step.node_idx as usize];
         let edge = &mut node.children[step.child_idx];
-
         edge.visit_count += 1;
         edge.value_sum += value;
         node.visit_count += 1;
-
-        // Flip value for parent perspective (2-player zero-sum)
-        value = -value;
     }
 }
 
-/// Compute terminal value from game result (from perspective of to_play).
-fn compute_terminal_value(state: &GameState, to_play: PlayerIdx) -> f32 {
-    // For 2-player, compute normalized reward
-    let my_score = state.players[to_play as usize].score as f32;
-    let opp_idx = 1 - to_play as usize;
-    let opp_score = state.players[opp_idx].score as f32;
-
-    // Return value in [-1, 1] range
-    let diff = my_score - opp_score;
-    // Clamp to prevent extreme values
-    (diff / 50.0).clamp(-1.0, 1.0)
+/// Terminal node value for dense-reward MCTS.
+///
+/// When backing up `Q(s,a) = r(s,a) + V(s')`, all score changes (including endgame
+/// bonuses) are captured by the per-step reward on the final transition, so the
+/// remaining value at a terminal state is 0.
+fn compute_terminal_value(_state: &GameState, _to_play: PlayerIdx) -> f32 {
+    0.0
 }
 
 /// Softmax over legal logits to produce priors.
@@ -736,7 +886,7 @@ fn add_dirichlet_noise(edges: &mut [ChildEdge], alpha: f32, eps: f32, rng: &mut 
 impl<F, N> Agent for AlphaZeroMctsAgent<F, N>
 where
     F: FeatureExtractor,
-    N: PolicyValueNet,
+    N: PolicyValueNet + Clone + Send + 'static,
 {
     fn select_action(&mut self, input: &AgentInput, rng: &mut impl Rng) -> ActionId {
         let state = input
@@ -775,7 +925,7 @@ where
 impl<F, N> crate::alphazero::training::MctsAgentExt for AlphaZeroMctsAgent<F, N>
 where
     F: FeatureExtractor,
-    N: PolicyValueNet,
+    N: PolicyValueNet + Clone + Send + 'static,
 {
     fn select_action_and_policy(
         &mut self,
@@ -830,7 +980,7 @@ where
 impl<F, N> crate::alphazero::training::TrainableModel for AlphaZeroMctsAgent<F, N>
 where
     F: FeatureExtractor,
-    N: PolicyValueNet + crate::alphazero::training::TrainableModel,
+    N: PolicyValueNet + crate::alphazero::training::TrainableModel + Send + Clone + 'static,
 {
     fn param_count(&self) -> usize {
         crate::alphazero::training::TrainableModel::param_count(&self.net)
@@ -849,7 +999,9 @@ where
             &mut self.net,
             learning_rate,
             grads,
-        )
+        );
+        // Keep inference worker in sync after updates.
+        self.inference.update_net(self.net.clone());
     }
 
     fn eval_parameters(&self) {
@@ -861,14 +1013,18 @@ where
     }
 
     fn load(&mut self, path: &std::path::Path) -> std::io::Result<()> {
-        crate::alphazero::training::TrainableModel::load(&mut self.net, path)
+        let res = crate::alphazero::training::TrainableModel::load(&mut self.net, path);
+        if res.is_ok() {
+            self.inference.update_net(self.net.clone());
+        }
+        res
     }
 }
 
 impl<F, N> mlx_rs::module::ModuleParameters for AlphaZeroMctsAgent<F, N>
 where
     F: FeatureExtractor,
-    N: PolicyValueNet + mlx_rs::module::ModuleParameters,
+    N: PolicyValueNet + mlx_rs::module::ModuleParameters + Send + Clone + 'static,
 {
     fn num_parameters(&self) -> usize {
         mlx_rs::module::ModuleParameters::num_parameters(&self.net)
@@ -912,6 +1068,7 @@ mod tests {
 
     /// Dummy neural network for MCTS testing.
     /// Returns fixed priors and value, useful for testing MCTS logic independently.
+    #[derive(Clone)]
     pub struct DummyNet {
         pub priors: [f32; ACTION_SPACE_SIZE],
         pub value: f32,
@@ -1279,5 +1436,200 @@ mod tests {
             "Selected action {} must be legal",
             result.action
         );
+    }
+
+    #[test]
+    fn test_backup_flips_value_when_to_play_changes() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let state = azul_engine::new_game(2, 0, &mut rng);
+
+        let mut tree = MctsTree::default();
+        tree.nodes.push(Node {
+            state: state.clone(),
+            to_play: 0,
+            is_terminal: false,
+            children: vec![ChildEdge {
+                action_id: 0,
+                prior: 1.0,
+                visit_count: 0,
+                value_sum: 0.0,
+                reward: 0.0,
+                child: Some(1),
+                pending: false,
+            }],
+            visit_count: 0,
+            nn_value: None,
+        });
+        tree.nodes.push(Node {
+            state,
+            to_play: 1,
+            is_terminal: false,
+            children: Vec::new(),
+            visit_count: 0,
+            nn_value: None,
+        });
+
+        let step = PathStep {
+            node_idx: 0,
+            child_idx: 0,
+        };
+        apply_virtual_loss(&mut tree, &step, 1.0);
+        backup_with_virtual_loss(&mut tree, &[step], 0.5, 1.0);
+
+        let edge = &tree.nodes[0].children[0];
+        assert_eq!(edge.visit_count, 1);
+        assert!((edge.value_sum - (-0.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_backup_keeps_value_when_to_play_same() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let state = azul_engine::new_game(2, 0, &mut rng);
+
+        let mut tree = MctsTree::default();
+        tree.nodes.push(Node {
+            state: state.clone(),
+            to_play: 0,
+            is_terminal: false,
+            children: vec![ChildEdge {
+                action_id: 0,
+                prior: 1.0,
+                visit_count: 0,
+                value_sum: 0.0,
+                reward: 0.0,
+                child: Some(1),
+                pending: false,
+            }],
+            visit_count: 0,
+            nn_value: None,
+        });
+        tree.nodes.push(Node {
+            state,
+            to_play: 0,
+            is_terminal: false,
+            children: Vec::new(),
+            visit_count: 0,
+            nn_value: None,
+        });
+
+        let step = PathStep {
+            node_idx: 0,
+            child_idx: 0,
+        };
+        apply_virtual_loss(&mut tree, &step, 1.0);
+        backup_with_virtual_loss(&mut tree, &[step], 0.5, 1.0);
+
+        let edge = &tree.nodes[0].children[0];
+        assert_eq!(edge.visit_count, 1);
+        assert!((edge.value_sum - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_mcts_prefers_higher_dense_reward_in_terminal_puzzle() {
+        use azul_engine::{Action, Color, DraftDestination, DraftSource, Token, WALL_DEST_COL};
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let mut state = azul_engine::new_game(2, 0, &mut rng);
+
+        // Make this the (already-triggered) final round so the game ends after this round resolves.
+        state.final_round_triggered = true;
+
+        // Ensure it's player 0's turn.
+        state.current_player = 0;
+
+        // Clear factories and leave exactly one tile in the center so this move ends the round.
+        for f in 0..state.factories.num_factories as usize {
+            state.factories.factories[f].len = 0;
+        }
+        state.center.len = 1;
+        state.center.items[0] = Token::Tile(Color::Red);
+
+        // Block rows 1–3 for Red so we only compare row0 vs row4 (plus Floor).
+        for row in 1..=3usize {
+            let col = WALL_DEST_COL[row][Color::Red as usize] as usize;
+            state.players[0].wall[row][col] = Some(Color::Red);
+        }
+
+        // Set up a strong incentive to place on row 4:
+        // - Pattern line row4 already has 4 Red tiles, so placing 1 more completes it.
+        // - Wall row4 is filled except the Red column, so the placement creates a complete row,
+        //   yielding high placement score + final scoring bonus.
+        state.players[0].pattern_lines[4].color = Some(Color::Red);
+        state.players[0].pattern_lines[4].count = 4;
+
+        let red_col_row4 = WALL_DEST_COL[4][Color::Red as usize] as usize;
+        for col in 0..azul_engine::BOARD_SIZE {
+            if col != red_col_row4 {
+                state.players[0].wall[4][col] = Some(Color::Blue);
+            }
+        }
+
+        let bad_action = Action {
+            source: DraftSource::Center,
+            color: Color::Red,
+            dest: DraftDestination::PatternLine(0),
+        };
+        let good_action = Action {
+            source: DraftSource::Center,
+            color: Color::Red,
+            dest: DraftDestination::PatternLine(4),
+        };
+
+        let legal = azul_engine::legal_actions(&state);
+        assert!(legal.contains(&bad_action), "bad_action should be legal");
+        assert!(legal.contains(&good_action), "good_action should be legal");
+
+        fn reward_from_parent_perspective(parent: &GameState, child: &GameState, to_play: u8) -> f32 {
+            let my_before = parent.players[to_play as usize].score as f32;
+            let opp_before = parent.players[1 - to_play as usize].score as f32;
+            let my_after = child.players[to_play as usize].score as f32;
+            let opp_after = child.players[1 - to_play as usize].score as f32;
+            ((my_after - my_before) - (opp_after - opp_before)) / 20.0
+        }
+
+        // Sanity-check the puzzle: good_action must yield a higher immediate reward.
+        let mut r1 = rand::rngs::StdRng::seed_from_u64(1);
+        let bad_child = apply_action(state.clone(), bad_action, &mut r1).unwrap();
+        let r_bad = reward_from_parent_perspective(&state, &bad_child.state, 0);
+
+        let mut r2 = rand::rngs::StdRng::seed_from_u64(2);
+        let good_child = apply_action(state.clone(), good_action, &mut r2).unwrap();
+        let r_good = reward_from_parent_perspective(&state, &good_child.state, 0);
+
+        assert!(
+            r_good > r_bad,
+            "expected good_action reward > bad_action reward, got {r_good} vs {r_bad}"
+        );
+
+        // With a uniform prior/value network, MCTS should still choose the higher-reward move.
+        let features = BasicFeatureExtractor::new(2);
+        let dummy_net = DummyNet::uniform(0.0);
+        let mcts_config = MctsConfig {
+            num_simulations: 64,
+            temperature: 0.0,
+            root_dirichlet_alpha: 0.0,
+            ..MctsConfig::default()
+        };
+        let mut agent = AlphaZeroMctsAgent::new(mcts_config, features.clone(), dummy_net);
+
+        let obs = features.encode(&state, state.current_player);
+        let mut legal_mask = vec![false; ACTION_SPACE_SIZE];
+        for a in &legal {
+            let id = ActionEncoder::encode(a);
+            legal_mask[id as usize] = true;
+        }
+
+        let input = AgentInput {
+            observation: &obs,
+            legal_action_mask: &legal_mask,
+            current_player: state.current_player,
+            state: Some(&state),
+        };
+
+        let mut mcts_rng = rand::rngs::StdRng::seed_from_u64(42);
+        let result = agent.select_action_and_policy(&input, 0.0, &mut mcts_rng);
+
+        let good_id = ActionEncoder::encode(&good_action);
+        assert_eq!(result.action, good_id);
     }
 }

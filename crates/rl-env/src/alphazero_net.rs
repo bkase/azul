@@ -17,6 +17,9 @@ use crate::{Observation, ACTION_SPACE_SIZE};
 /// - Trunk: Linear(obs_size, hidden_size) -> Relu -> Linear(hidden_size, hidden_size) -> Relu
 /// - Policy head: Linear(hidden_size, hidden_size) -> Relu -> Linear(hidden_size, ACTION_SPACE_SIZE)
 /// - Value head: Linear(hidden_size, hidden_size) -> Relu -> Linear(hidden_size, 1) -> Tanh
+///
+/// Clone is implemented to support parallel self-play games. MLX arrays use
+/// copy-on-write semantics, so cloning is efficient for read-only inference.
 #[derive(Debug, ModuleParameters)]
 #[module(root = mlx_rs)]
 pub struct AlphaZeroNet {
@@ -28,6 +31,30 @@ pub struct AlphaZeroNet {
     pub policy_head: Sequential,
     #[param]
     pub value_head: Sequential,
+}
+
+// Safe to mark Send because we run MLX inference on a single dedicated thread.
+unsafe impl Send for AlphaZeroNet {}
+
+impl Clone for AlphaZeroNet {
+    fn clone(&self) -> Self {
+        // Create a new network with the same architecture
+        let mut new_net = Self::new(self.obs_size, self.hidden_size);
+
+        // Copy parameters from self to new_net
+        let src_params = ModuleParameters::parameters(self).flatten();
+        let mut dst_params = ModuleParameters::parameters_mut(&mut new_net).flatten();
+
+        // Copy each parameter array
+        for (key, src_arr) in src_params {
+            if let Some(dst_arr) = dst_params.get_mut(&key) {
+                // MLX arrays use copy-on-write, so this is efficient
+                **dst_arr = src_arr.clone();
+            }
+        }
+
+        new_net
+    }
 }
 
 impl AlphaZeroNet {

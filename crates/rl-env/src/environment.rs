@@ -38,6 +38,9 @@ pub trait Environment {
 }
 
 /// Azul RL Environment
+///
+/// Clone is implemented to support parallel self-play games.
+/// Each cloned environment maintains independent game state.
 pub struct AzulEnv<F: FeatureExtractor> {
     /// Underlying Azul engine state
     pub game_state: GameState,
@@ -56,6 +59,19 @@ pub struct AzulEnv<F: FeatureExtractor> {
 
     /// Cached zero observation for inactive players (avoids allocation per step)
     cached_zero_obs: Observation,
+}
+
+impl<F: FeatureExtractor + Clone> Clone for AzulEnv<F> {
+    fn clone(&self) -> Self {
+        Self {
+            game_state: self.game_state.clone(),
+            config: self.config.clone(),
+            features: self.features.clone(),
+            last_action: self.last_action,
+            done: self.done,
+            cached_zero_obs: self.cached_zero_obs.clone(),
+        }
+    }
 }
 
 impl<F: FeatureExtractor> AzulEnv<F> {

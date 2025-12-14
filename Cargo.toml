@@ -7,6 +7,9 @@ name = "azul"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+path = "src/lib.rs"
+
 [features]
 default = []
 profiling = ["azul-rl-env/profiling"]
@@ -21,6 +24,10 @@ mlx-rs = "0.25"
 [[bin]]
 name = "play"
 path = "src/bin/play.rs"
+
+[[bin]]
+name = "inspect"
+path = "src/bin/inspect.rs"
 
 [dev-dependencies]
 rand = "0.9"

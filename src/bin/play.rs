@@ -8,10 +8,8 @@ use std::path::PathBuf;
 use clap::Parser;
 use rand::SeedableRng;
 
-use azul_engine::{
-    apply_action, legal_actions, new_game, Action, Color, DraftDestination, DraftSource, GameState,
-    Phase, Token, BOARD_SIZE, WALL_PATTERN,
-};
+use azul::display::{display_board, format_action, BOLD, DIM, RESET};
+use azul_engine::{apply_action, legal_actions, new_game, Action, GameState, Phase};
 use azul_rl_env::{
     alphazero::training::TrainableModel, ActionEncoder, Agent, AgentInput, AlphaZeroMctsAgent,
     AlphaZeroNet, BasicFeatureExtractor, FeatureExtractor, MctsConfig,
@@ -37,166 +35,6 @@ struct Args {
     /// Random seed
     #[arg(long, default_value_t = 42)]
     seed: u64,
-}
-
-// ANSI color codes for tile display
-const BLUE: &str = "\x1b[94m";
-const YELLOW: &str = "\x1b[93m";
-const RED: &str = "\x1b[91m";
-const BLACK: &str = "\x1b[90m";
-const TEAL: &str = "\x1b[96m";
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-
-fn color_code(color: Color) -> &'static str {
-    match color {
-        Color::Blue => BLUE,
-        Color::Yellow => YELLOW,
-        Color::Red => RED,
-        Color::Black => BLACK,
-        Color::Teal => TEAL,
-    }
-}
-
-fn color_char(color: Color) -> char {
-    match color {
-        Color::Blue => 'B',
-        Color::Yellow => 'Y',
-        Color::Red => 'R',
-        Color::Black => 'K',
-        Color::Teal => 'T',
-    }
-}
-
-fn display_tile(color: Color) -> String {
-    format!("{}{}{}", color_code(color), color_char(color), RESET)
-}
-
-fn display_token(token: Token) -> String {
-    match token {
-        Token::Tile(c) => display_tile(c),
-        Token::FirstPlayerMarker => format!("{}1{}", BOLD, RESET),
-    }
-}
-
-fn display_board(state: &GameState, human_player: u8) {
-    println!("\n{BOLD}══════════════════════════════════════════════════════════════{RESET}");
-    println!(
-        "{BOLD}  Round {}{RESET}   |   Current Player: {}",
-        state.round + 1,
-        if state.current_player == human_player {
-            format!("{BOLD}YOU{RESET}")
-        } else {
-            format!("{DIM}AI{RESET}")
-        }
-    );
-    println!("{BOLD}══════════════════════════════════════════════════════════════{RESET}\n");
-
-    // Factories
-    println!("{BOLD}FACTORIES:{RESET}");
-    for f in 0..state.factories.num_factories as usize {
-        let factory = &state.factories.factories[f];
-        print!("  F{}: ", f);
-        if factory.len == 0 {
-            print!("{DIM}(empty){RESET}");
-        } else {
-            for i in 0..factory.len as usize {
-                print!("{} ", display_tile(factory.tiles[i]));
-            }
-        }
-        println!();
-    }
-
-    // Center
-    print!("\n{BOLD}CENTER:{RESET} ");
-    if state.center.len == 0 {
-        print!("{DIM}(empty){RESET}");
-    } else {
-        for i in 0..state.center.len as usize {
-            print!("{} ", display_token(state.center.items[i]));
-        }
-    }
-    println!("\n");
-
-    // Player boards side by side
-    for p in 0..state.num_players as usize {
-        let player = &state.players[p];
-        let is_human = p as u8 == human_player;
-        let header = if is_human {
-            format!("{BOLD}YOUR BOARD (Score: {}){RESET}", player.score)
-        } else {
-            format!("{DIM}AI BOARD (Score: {}){RESET}", player.score)
-        };
-        println!("{}", header);
-        println!("  Pattern Lines          Wall");
-
-        for row in 0..BOARD_SIZE {
-            // Pattern line (right-aligned)
-            let line = &player.pattern_lines[row];
-            let cap = row + 1;
-            let empty = cap - line.count as usize;
-
-            print!("  ");
-            // Leading spaces for alignment
-            for _ in 0..(BOARD_SIZE - cap) {
-                print!("  ");
-            }
-            // Empty slots
-            for _ in 0..empty {
-                print!("{DIM}.{RESET} ");
-            }
-            // Filled slots
-            if let Some(color) = line.color {
-                for _ in 0..line.count {
-                    print!("{} ", display_tile(color));
-                }
-            }
-
-            print!(" → ");
-
-            // Wall
-            for col in 0..BOARD_SIZE {
-                if let Some(color) = player.wall[row][col] {
-                    print!("{} ", display_tile(color));
-                } else {
-                    // Show expected color dimmed
-                    let expected = WALL_PATTERN[row][col];
-                    print!("{}{}{} ", DIM, color_char(expected), RESET);
-                }
-            }
-            println!();
-        }
-
-        // Floor
-        print!("  Floor: ");
-        if player.floor.len == 0 {
-            print!("{DIM}(empty){RESET}");
-        } else {
-            for i in 0..player.floor.len as usize {
-                print!("{} ", display_token(player.floor.slots[i]));
-            }
-        }
-        println!("\n");
-    }
-}
-
-fn format_action(action: &Action) -> String {
-    let source = match action.source {
-        DraftSource::Factory(f) => format!("F{}", f),
-        DraftSource::Center => "Center".to_string(),
-    };
-    let color = format!(
-        "{}{}{}",
-        color_code(action.color),
-        color_char(action.color),
-        RESET
-    );
-    let dest = match action.dest {
-        DraftDestination::PatternLine(r) => format!("Line {}", r + 1),
-        DraftDestination::Floor => "Floor".to_string(),
-    };
-    format!("{} → {} → {}", source, color, dest)
 }
 
 fn get_human_action(state: &GameState) -> Action {
@@ -304,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Game loop
     while state.phase != Phase::GameOver {
-        display_board(&state, human_player);
+        display_board(&state, Some(human_player));
 
         let action = if state.current_player == human_player {
             get_human_action(&state)
@@ -333,7 +171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state = result.state;
 
         if let Some(scores) = result.final_scores {
-            display_board(&state, human_player);
+            display_board(&state, Some(human_player));
             println!("\n{BOLD}═══════════════════════════════════════{RESET}");
             println!("{BOLD}                GAME OVER{RESET}");
             println!("{BOLD}═══════════════════════════════════════{RESET}");

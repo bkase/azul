@@ -92,6 +92,7 @@ mod tests {
         TrainingExample {
             observation: Array::zeros::<f32>(&[10]).unwrap(),
             policy: vec![0.0; ACTION_SPACE_SIZE],
+            action: 0,
             value,
         }
     }
