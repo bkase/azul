@@ -18,5 +18,9 @@ clap = { version = "4", features = ["derive"] }
 rand = "0.9"
 mlx-rs = "0.25"
 
+[[bin]]
+name = "play"
+path = "src/bin/play.rs"
+
 [dev-dependencies]
 rand = "0.9"
