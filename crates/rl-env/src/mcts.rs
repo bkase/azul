@@ -79,6 +79,9 @@ where
         obs: Vec<f32>,
         batch: usize,
         obs_size: usize,
+        max_batch: usize,
+        eval_count: usize,
+        positions: usize,
         reply: mpsc::SyncSender<(Vec<f32>, Vec<f32>)>,
     },
     UpdateNet(N),
@@ -91,21 +94,222 @@ where
     fn new(mut net: N) -> Self {
         let (tx, rx) = mpsc::channel::<WorkerMsg<N>>();
         thread::spawn(move || {
-            while let Ok(msg) = rx.recv() {
-                match msg {
+            // Coalesce small inference requests to improve batch size and reduce Metal overhead.
+            const COALESCE_SPIN_NS: u64 = 200_000; // 200µs
+            const MIN_DISPATCH_BATCH: usize = 16; // don't flush tiny batches unless alone
+            while let Ok(first) = rx.recv() {
+                match first {
                     WorkerMsg::Infer {
                         obs,
                         batch,
                         obs_size,
+                        max_batch,
+                        eval_count,
+                        positions,
                         reply,
                     } => {
-                        let obs_batch =
-                            Array::from_slice(&obs, &[batch as i32, obs_size as i32]);
+                        let mut reqs = Vec::with_capacity(8);
+                        let mut total_req_batch = batch;
+                        reqs.push((obs, batch, obs_size, max_batch, eval_count, positions, reply));
+
+                        let start = std::time::Instant::now();
+                        // Collect additional requests quickly to grow batch
+                        while total_req_batch < max_batch {
+                            if start.elapsed().as_nanos() as u64 >= COALESCE_SPIN_NS {
+                                break;
+                            }
+                            // tiny sleep to let other senders enqueue
+                            std::thread::yield_now();
+                            if let Ok(next) = rx.try_recv() {
+                                match next {
+                                    WorkerMsg::Infer {
+                                        obs,
+                                        batch,
+                                        obs_size: next_obs,
+                                        max_batch: next_max,
+                                        eval_count,
+                                        positions,
+                                        reply,
+                                    } => {
+                                        // Only coalesce if obs_size matches; otherwise handle separately.
+                                        if next_obs == obs_size {
+                                            if total_req_batch + batch <= max_batch {
+                                                total_req_batch += batch;
+                                                reqs.push((
+                                                    obs,
+                                                    batch,
+                                                    obs_size,
+                                                    max_batch.min(next_max),
+                                                    eval_count,
+                                                    positions,
+                                                    reply,
+                                                ));
+                                            } else {
+                                                // Too large to coalesce, run separately immediately.
+                                                let obs_batch = Array::from_slice(
+                                                    &obs,
+                                                    &[batch as i32, next_obs as i32],
+                                                );
+                                                let (policy, values) = net.predict_batch(&obs_batch);
+                                                #[cfg(feature = "profiling")]
+                                                {
+                                                    PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
+                                                    PROF.mcts_nn_positions
+                                                        .fetch_add(positions as u64, Ordering::Relaxed);
+                                                    PROF.mcts_nn_evals
+                                                        .fetch_add(eval_count as u64, Ordering::Relaxed);
+                                                }
+                                                let _ = reply.send((
+                                                    policy.as_slice::<f32>().to_vec(),
+                                                    values.as_slice::<f32>().to_vec(),
+                                                ));
+                                            }
+                                        } else {
+                                            // Different shapes, run immediately.
+                                            let obs_batch =
+                                                Array::from_slice(&obs, &[batch as i32, next_obs as i32]);
+                                            let (policy, values) = net.predict_batch(&obs_batch);
+                                            #[cfg(feature = "profiling")]
+                                            {
+                                                PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
+                                                PROF.mcts_nn_positions
+                                                    .fetch_add(positions as u64, Ordering::Relaxed);
+                                                PROF.mcts_nn_evals
+                                                    .fetch_add(eval_count as u64, Ordering::Relaxed);
+                                            }
+                                            let _ = reply.send((
+                                                policy.as_slice::<f32>().to_vec(),
+                                                values.as_slice::<f32>().to_vec(),
+                                            ));
+                                        }
+                                    }
+                                    WorkerMsg::UpdateNet(new_net) => {
+                                        net = new_net;
+                                    }
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+
+                        // Build mega batch
+                        #[cfg(feature = "profiling")]
+                        let queue_start = std::time::Instant::now();
+                        if reqs.iter().map(|(_, b, _, _, _, _, _)| *b).sum::<usize>() < MIN_DISPATCH_BATCH
+                            && reqs.len() > 1
+                        {
+                            // If we coalesced but still too small, wait a bit more (one extra window) for more work.
+                            let extra_start = std::time::Instant::now();
+                            while total_req_batch < max_batch {
+                                if extra_start.elapsed().as_nanos() as u64 >= COALESCE_SPIN_NS {
+                                    break;
+                                }
+                                std::thread::yield_now();
+                                if let Ok(next) = rx.try_recv() {
+                                    match next {
+                                        WorkerMsg::Infer {
+                                            obs,
+                                            batch,
+                                            obs_size: next_obs,
+                                            max_batch: next_max,
+                                            eval_count,
+                                            positions,
+                                            reply,
+                                        } => {
+                                            if next_obs == obs_size
+                                                && total_req_batch + batch <= max_batch
+                                            {
+                                                total_req_batch += batch;
+                                                reqs.push((
+                                                    obs,
+                                                    batch,
+                                                    obs_size,
+                                                    max_batch.min(next_max),
+                                                    eval_count,
+                                                    positions,
+                                                    reply,
+                                                ));
+                                            } else {
+                                                // fall back: run separately
+                                                let obs_batch = Array::from_slice(
+                                                    &obs,
+                                                    &[batch as i32, next_obs as i32],
+                                                );
+                                                let (policy, values) = net.predict_batch(&obs_batch);
+                                                #[cfg(feature = "profiling")]
+                                                {
+                                                    PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
+                                                    PROF.mcts_nn_positions
+                                                        .fetch_add(positions as u64, Ordering::Relaxed);
+                                                    PROF.mcts_nn_evals
+                                                        .fetch_add(eval_count as u64, Ordering::Relaxed);
+                                                }
+                                                let _ = reply.send((
+                                                    policy.as_slice::<f32>().to_vec(),
+                                                    values.as_slice::<f32>().to_vec(),
+                                                ));
+                                            }
+                                        }
+                                        WorkerMsg::UpdateNet(new_net) => {
+                                            net = new_net;
+                                        }
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        let total_batch: usize = reqs.iter().map(|(_, b, _, _, _, _, _)| *b).sum();
+                        let _total_positions: usize =
+                            reqs.iter().map(|(_, _, _, _, _, p, _)| *p).sum();
+                        let _total_evals: usize =
+                            reqs.iter().map(|(_, _, _, _, e, _, _)| *e).sum();
+                        let mut obs_concat = Vec::with_capacity(total_batch * obs_size);
+                        let mut splits: Vec<usize> = Vec::with_capacity(reqs.len());
+                        for (obs, b, _, _, _, _, _) in reqs.iter() {
+                            obs_concat.extend_from_slice(obs);
+                            splits.push(*b);
+                        }
+
+                        let obs_batch = Array::from_slice(&obs_concat, &[total_batch as i32, obs_size as i32]);
+                        #[cfg(feature = "profiling")]
+                        let worker_start = std::time::Instant::now();
                         let (policy, values) = net.predict_batch(&obs_batch);
-                        let _ = reply.send((
-                            policy.as_slice::<f32>().to_vec(),
-                            values.as_slice::<f32>().to_vec(),
-                        ));
+                        #[cfg(feature = "profiling")]
+                        {
+                            let worker_elapsed = worker_start.elapsed().as_nanos() as u64;
+                            PROF.time_nn_worker_ns
+                                .fetch_add(worker_elapsed, Ordering::Relaxed);
+                        }
+                        #[cfg(feature = "profiling")]
+                        {
+                            PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
+                            PROF.mcts_nn_positions
+                                .fetch_add(_total_positions as u64, Ordering::Relaxed);
+                            PROF.mcts_nn_evals
+                                .fetch_add(_total_evals as u64, Ordering::Relaxed);
+                        }
+                        let logits_all = policy.as_slice::<f32>().to_vec();
+                        let values_all = values.as_slice::<f32>().to_vec();
+
+                        // Dispatch slices back
+                        let mut logits_off = 0;
+                        let mut values_off = 0;
+                        for ((_, _, _, _, _, _, reply), b) in reqs.into_iter().zip(splits.into_iter()) {
+                            let logits_len = b * ACTION_SPACE_SIZE;
+                            let logits_slice = logits_all[logits_off..logits_off + logits_len].to_vec();
+                            let values_slice = values_all[values_off..values_off + b].to_vec();
+                            let _ = reply.send((logits_slice, values_slice));
+                            logits_off += logits_len;
+                            values_off += b;
+                        }
+
+                        #[cfg(feature = "profiling")]
+                        {
+                            let queue_elapsed = queue_start.elapsed().as_nanos() as u64;
+                            PROF.time_nn_worker_queue_ns
+                                .fetch_add(queue_elapsed, Ordering::Relaxed);
+                        }
                     }
                     WorkerMsg::UpdateNet(new_net) => {
                         net = new_net;
@@ -116,13 +320,24 @@ where
         Self { tx }
     }
 
-    fn infer(&self, obs: Vec<f32>, batch: usize, obs_size: usize) -> (Vec<f32>, Vec<f32>) {
+    fn infer(
+        &self,
+        obs: Vec<f32>,
+        batch: usize,
+        obs_size: usize,
+        max_batch: usize,
+        eval_count: usize,
+        positions: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.tx
             .send(WorkerMsg::Infer {
                 obs,
                 batch,
                 obs_size,
+                max_batch,
+                eval_count,
+                positions,
                 reply: reply_tx,
             })
             .expect("Inference worker channel closed");
@@ -314,6 +529,8 @@ where
         };
         let idx = tree.nodes.len() as NodeIdx;
         tree.nodes.push(node);
+        #[cfg(feature = "profiling")]
+        PROF.mcts_nodes_created.fetch_add(1, Ordering::Relaxed);
         idx
     }
 
@@ -496,13 +713,16 @@ where
             let (logits_vec, values_vec) = {
                 #[cfg(feature = "profiling")]
                 let _t = Timer::new(&PROF.time_mcts_nn_eval_ns);
-                #[cfg(feature = "profiling")]
-                {
-                    PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
-                    PROF.mcts_nn_positions.fetch_add(b as u64, Ordering::Relaxed);
-                }
+                let max_batch = (self.config.nn_batch_size.max(b) * 2).max(1);
                 self.inference
-                    .infer(obs_scratch.clone(), b, obs_size)
+                    .infer(
+                        obs_scratch.clone(),
+                        b,
+                        obs_size,
+                        max_batch,
+                        unique_leafs.len(),
+                        b,
+                    )
             };
             let logits = &logits_vec;
             let values = &values_vec;
@@ -564,12 +784,9 @@ where
             let (logits_vec, values_vec) = {
                 #[cfg(feature = "profiling")]
                 let _t = Timer::new(&PROF.time_mcts_nn_eval_ns);
-                #[cfg(feature = "profiling")]
-                {
-                    PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
-                    PROF.mcts_nn_positions.fetch_add(1, Ordering::Relaxed);
-                }
-                self.inference.infer(obs_data, 1, obs_size)
+                let max_batch = (self.config.nn_batch_size.max(1) * 2).max(1);
+                self.inference
+                    .infer(obs_data, 1, obs_size, max_batch, 1, 1)
             };
 
             let logits_row = &logits_vec[0..ACTION_SPACE_SIZE];

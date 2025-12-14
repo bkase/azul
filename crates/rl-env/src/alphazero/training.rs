@@ -472,6 +472,8 @@ where
     /// Run the main training loop.
     pub fn run(&mut self) -> Result<(), TrainingError> {
         for iter in self.cfg.start_iter..self.cfg.num_iters {
+            #[cfg(feature = "profiling")]
+            let iter_wall = std::time::Instant::now();
             // 1. Self-play (parallelized with deterministic seeding)
             #[cfg(feature = "profiling")]
             let _t_sp = Timer::new(&PROF.time_self_play_ns);
@@ -642,6 +644,12 @@ where
                     trunc_pct,
                     two_player_stats
                 );
+            }
+            #[cfg(feature = "profiling")]
+            {
+                let elapsed = iter_wall.elapsed().as_nanos() as u64;
+                PROF.time_iter_wall_ns
+                    .fetch_add(elapsed, Ordering::Relaxed);
             }
         }
 

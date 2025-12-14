@@ -40,6 +40,10 @@ pub struct Counters {
     pub time_env_reset_ns: AtomicU64,
     /// Wall-clock time per iteration (sum of completed iters).
     pub time_iter_wall_ns: AtomicU64,
+    /// Wall-clock time spent executing predict_batch inside the inference worker.
+    pub time_nn_worker_ns: AtomicU64,
+    /// Wall-clock time waiting/processing in the inference worker queue (coalescing + slices).
+    pub time_nn_worker_queue_ns: AtomicU64,
 }
 
 impl Counters {
@@ -72,6 +76,8 @@ impl Counters {
             time_env_step_ns: AtomicU64::new(0),
             time_env_reset_ns: AtomicU64::new(0),
             time_iter_wall_ns: AtomicU64::new(0),
+            time_nn_worker_ns: AtomicU64::new(0),
+            time_nn_worker_queue_ns: AtomicU64::new(0),
         }
     }
 
@@ -101,6 +107,8 @@ impl Counters {
         self.time_env_step_ns.store(0, Ordering::Relaxed);
         self.time_env_reset_ns.store(0, Ordering::Relaxed);
         self.time_iter_wall_ns.store(0, Ordering::Relaxed);
+        self.time_nn_worker_ns.store(0, Ordering::Relaxed);
+        self.time_nn_worker_queue_ns.store(0, Ordering::Relaxed);
     }
 }
 
@@ -168,6 +176,8 @@ pub fn print_summary() {
     let time_env_step_ns = PROF.time_env_step_ns.load(Ordering::Relaxed);
     let time_env_reset_ns = PROF.time_env_reset_ns.load(Ordering::Relaxed);
     let time_iter_wall_ns = PROF.time_iter_wall_ns.load(Ordering::Relaxed);
+    let time_nn_worker_ns = PROF.time_nn_worker_ns.load(Ordering::Relaxed);
+    let time_nn_worker_queue_ns = PROF.time_nn_worker_queue_ns.load(Ordering::Relaxed);
 
     // Convert ns to seconds
     let ns_to_sec = |ns: u64| ns as f64 / 1_000_000_000.0;
@@ -199,6 +209,8 @@ pub fn print_summary() {
     eprintln!("  Env step total:       {:>10.3} s", ns_to_sec(time_env_step_ns));
     eprintln!("  Env reset total:      {:>10.3} s", ns_to_sec(time_env_reset_ns));
     eprintln!("  Iter wall total:      {:>10.3} s", ns_to_sec(time_iter_wall_ns));
+    eprintln!("  NN worker total:      {:>10.3} s", ns_to_sec(time_nn_worker_ns));
+    eprintln!("  NN worker queue:      {:>10.3} s", ns_to_sec(time_nn_worker_queue_ns));
 
     eprintln!("\nDerived Metrics:");
 
