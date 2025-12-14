@@ -279,12 +279,18 @@ where
     let outcomes = compute_outcomes_from_scores(&scores);
 
     // 4. Convert PendingMove -> TrainingExample
+    // Force evaluation of observations before storing in replay buffer.
+    // MLX arrays are lazy - without eval(), the underlying event/stream tracking
+    // can become invalid when arrays are stored for a long time.
     moves
         .into_iter()
-        .map(|m| TrainingExample {
-            observation: m.observation,
-            policy: m.policy,
-            value: outcomes[m.player as usize],
+        .map(|m| {
+            m.observation.eval().expect("Failed to evaluate observation");
+            TrainingExample {
+                observation: m.observation,
+                policy: m.policy,
+                value: outcomes[m.player as usize],
+            }
         })
         .collect()
 }
