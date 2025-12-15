@@ -10,7 +10,7 @@ use azul_engine::{apply_action, legal_actions, GameState, Phase, PlayerIdx};
 use mlx_rs::Array;
 use rand::Rng;
 use rand_distr::{Distribution, Gamma};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc;
 use std::thread;
 
@@ -68,7 +68,7 @@ struct InferenceWorker<N>
 where
     N: PolicyValueNet + Send + Clone + 'static,
 {
-    tx: mpsc::Sender<WorkerMsg<N>>,
+    tx: mpsc::SyncSender<WorkerMsg<N>>,
 }
 
 enum WorkerMsg<N>
@@ -92,12 +92,37 @@ where
     N: PolicyValueNet + Send + Clone + 'static,
 {
     fn new(mut net: N) -> Self {
-        let (tx, rx) = mpsc::channel::<WorkerMsg<N>>();
+        // Bounded channel provides backpressure and improves batch formation under load.
+        const INFER_CHAN_CAP: usize = 1024;
+        let (tx, rx) = mpsc::sync_channel::<WorkerMsg<N>>(INFER_CHAN_CAP);
         thread::spawn(move || {
-            // Coalesce small inference requests to improve batch size and reduce Metal overhead.
-            const COALESCE_SPIN_NS: u64 = 200_000; // 200µs
-            const MIN_DISPATCH_BATCH: usize = 16; // don't flush tiny batches unless alone
-            while let Ok(first) = rx.recv() {
+            // Drain-loop batching:
+            // - Block for first request
+            // - Drain as many queued requests as possible (up to max_batch)
+            // - Optionally wait a tiny amount once if batch is very small
+            const MIN_DISPATCH_BATCH: usize = 16;
+            const SMALL_BATCH_WAIT_US: u64 = 100;
+
+            struct InferReq {
+                obs: Vec<f32>,
+                batch: usize,
+                #[cfg(feature = "profiling")]
+                eval_count: usize,
+                #[cfg(feature = "profiling")]
+                positions: usize,
+                reply: mpsc::SyncSender<(Vec<f32>, Vec<f32>)>,
+            }
+
+            let mut backlog: VecDeque<WorkerMsg<N>> = VecDeque::new();
+            loop {
+                let first = match backlog.pop_front() {
+                    Some(msg) => msg,
+                    None => match rx.recv() {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    },
+                };
+
                 match first {
                     WorkerMsg::Infer {
                         obs,
@@ -108,19 +133,87 @@ where
                         positions,
                         reply,
                     } => {
-                        let mut reqs = Vec::with_capacity(8);
+                        #[cfg(not(feature = "profiling"))]
+                        let _ = (eval_count, positions);
+                        #[cfg(feature = "profiling")]
+                        let queue_start = std::time::Instant::now();
+                        let mut reqs: Vec<InferReq> = Vec::with_capacity(8);
                         let mut total_req_batch = batch;
-                        reqs.push((obs, batch, obs_size, max_batch, eval_count, positions, reply));
+                        let mut max_batch = max_batch;
+                        reqs.push(InferReq {
+                            obs,
+                            batch,
+                            #[cfg(feature = "profiling")]
+                            eval_count,
+                            #[cfg(feature = "profiling")]
+                            positions,
+                            reply,
+                        });
 
-                        let start = std::time::Instant::now();
-                        // Collect additional requests quickly to grow batch
+                        // Drain queued requests.
                         while total_req_batch < max_batch {
-                            if start.elapsed().as_nanos() as u64 >= COALESCE_SPIN_NS {
-                                break;
+                            match rx.try_recv() {
+                                Ok(next) => match next {
+                                    WorkerMsg::Infer {
+                                        obs,
+                                        batch,
+                                        obs_size: next_obs,
+                                        max_batch: next_max,
+                                        eval_count,
+                                        positions,
+                                        reply,
+                                    } => {
+                                        if next_obs == obs_size {
+                                            let new_max = max_batch.min(next_max);
+                                            if total_req_batch + batch <= new_max {
+                                                max_batch = new_max;
+                                                total_req_batch += batch;
+                                                reqs.push(InferReq {
+                                                    obs,
+                                                    batch,
+                                                    #[cfg(feature = "profiling")]
+                                                    eval_count,
+                                                    #[cfg(feature = "profiling")]
+                                                    positions,
+                                                    reply,
+                                                });
+                                            } else {
+                                                backlog.push_back(WorkerMsg::Infer {
+                                                    obs,
+                                                    batch,
+                                                    obs_size: next_obs,
+                                                    max_batch: next_max,
+                                                    eval_count,
+                                                    positions,
+                                                    reply,
+                                                });
+                                            }
+                                        } else {
+                                            backlog.push_back(WorkerMsg::Infer {
+                                                obs,
+                                                batch,
+                                                obs_size: next_obs,
+                                                max_batch: next_max,
+                                                eval_count,
+                                                positions,
+                                                reply,
+                                            });
+                                        }
+                                    }
+                                    WorkerMsg::UpdateNet(new_net) => {
+                                        net = new_net;
+                                    }
+                                },
+                                Err(mpsc::TryRecvError::Empty) => break,
+                                Err(mpsc::TryRecvError::Disconnected) => return,
                             }
-                            // tiny sleep to let other senders enqueue
-                            std::thread::yield_now();
-                            if let Ok(next) = rx.try_recv() {
+                        }
+
+                        // Optional tiny wait once if batch is very small and queue is empty.
+                        if total_req_batch < MIN_DISPATCH_BATCH {
+                            if let Ok(next) = rx
+                                .recv_timeout(std::time::Duration::from_micros(SMALL_BATCH_WAIT_US))
+                            {
                                 match next {
                                     WorkerMsg::Infer {
                                         obs,
@@ -131,150 +224,129 @@ where
                                         positions,
                                         reply,
                                     } => {
-                                        // Only coalesce if obs_size matches; otherwise handle separately.
                                         if next_obs == obs_size {
-                                            if total_req_batch + batch <= max_batch {
+                                            let new_max = max_batch.min(next_max);
+                                            if total_req_batch + batch <= new_max {
+                                                max_batch = new_max;
                                                 total_req_batch += batch;
-                                                reqs.push((
+                                                reqs.push(InferReq {
                                                     obs,
                                                     batch,
-                                                    obs_size,
-                                                    max_batch.min(next_max),
+                                                    #[cfg(feature = "profiling")]
+                                                    eval_count,
+                                                    #[cfg(feature = "profiling")]
+                                                    positions,
+                                                    reply,
+                                                });
+                                            } else {
+                                                backlog.push_back(WorkerMsg::Infer {
+                                                    obs,
+                                                    batch,
+                                                    obs_size: next_obs,
+                                                    max_batch: next_max,
                                                     eval_count,
                                                     positions,
                                                     reply,
-                                                ));
-                                            } else {
-                                                // Too large to coalesce, run separately immediately.
-                                                let obs_batch = Array::from_slice(
-                                                    &obs,
-                                                    &[batch as i32, next_obs as i32],
-                                                );
-                                                let (policy, values) = net.predict_batch(&obs_batch);
-                                                #[cfg(feature = "profiling")]
-                                                {
-                                                    PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
-                                                    PROF.mcts_nn_positions
-                                                        .fetch_add(positions as u64, Ordering::Relaxed);
-                                                    PROF.mcts_nn_evals
-                                                        .fetch_add(eval_count as u64, Ordering::Relaxed);
-                                                }
-                                                let _ = reply.send((
-                                                    policy.as_slice::<f32>().to_vec(),
-                                                    values.as_slice::<f32>().to_vec(),
-                                                ));
+                                                });
                                             }
                                         } else {
-                                            // Different shapes, run immediately.
-                                            let obs_batch =
-                                                Array::from_slice(&obs, &[batch as i32, next_obs as i32]);
-                                            let (policy, values) = net.predict_batch(&obs_batch);
-                                            #[cfg(feature = "profiling")]
-                                            {
-                                                PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
-                                                PROF.mcts_nn_positions
-                                                    .fetch_add(positions as u64, Ordering::Relaxed);
-                                                PROF.mcts_nn_evals
-                                                    .fetch_add(eval_count as u64, Ordering::Relaxed);
-                                            }
-                                            let _ = reply.send((
-                                                policy.as_slice::<f32>().to_vec(),
-                                                values.as_slice::<f32>().to_vec(),
-                                            ));
+                                            backlog.push_back(WorkerMsg::Infer {
+                                                obs,
+                                                batch,
+                                                obs_size: next_obs,
+                                                max_batch: next_max,
+                                                eval_count,
+                                                positions,
+                                                reply,
+                                            });
                                         }
                                     }
                                     WorkerMsg::UpdateNet(new_net) => {
                                         net = new_net;
                                     }
                                 }
-                            } else {
-                                break;
                             }
                         }
 
-                        // Build mega batch
-                        #[cfg(feature = "profiling")]
-                        let queue_start = std::time::Instant::now();
-                        if reqs.iter().map(|(_, b, _, _, _, _, _)| *b).sum::<usize>() < MIN_DISPATCH_BATCH
-                            && reqs.len() > 1
-                        {
-                            // If we coalesced but still too small, wait a bit more (one extra window) for more work.
-                            let extra_start = std::time::Instant::now();
-                            while total_req_batch < max_batch {
-                                if extra_start.elapsed().as_nanos() as u64 >= COALESCE_SPIN_NS {
-                                    break;
-                                }
-                                std::thread::yield_now();
-                                if let Ok(next) = rx.try_recv() {
-                                    match next {
-                                        WorkerMsg::Infer {
-                                            obs,
-                                            batch,
-                                            obs_size: next_obs,
-                                            max_batch: next_max,
-                                            eval_count,
-                                            positions,
-                                            reply,
-                                        } => {
-                                            if next_obs == obs_size
-                                                && total_req_batch + batch <= max_batch
-                                            {
+                        // Drain again after the optional wait.
+                        while total_req_batch < max_batch {
+                            match rx.try_recv() {
+                                Ok(next) => match next {
+                                    WorkerMsg::Infer {
+                                        obs,
+                                        batch,
+                                        obs_size: next_obs,
+                                        max_batch: next_max,
+                                        eval_count,
+                                        positions,
+                                        reply,
+                                    } => {
+                                        if next_obs == obs_size {
+                                            let new_max = max_batch.min(next_max);
+                                            if total_req_batch + batch <= new_max {
+                                                max_batch = new_max;
                                                 total_req_batch += batch;
-                                                reqs.push((
+                                                reqs.push(InferReq {
                                                     obs,
                                                     batch,
-                                                    obs_size,
-                                                    max_batch.min(next_max),
+                                                    #[cfg(feature = "profiling")]
+                                                    eval_count,
+                                                    #[cfg(feature = "profiling")]
+                                                    positions,
+                                                    reply,
+                                                });
+                                            } else {
+                                                backlog.push_back(WorkerMsg::Infer {
+                                                    obs,
+                                                    batch,
+                                                    obs_size: next_obs,
+                                                    max_batch: next_max,
                                                     eval_count,
                                                     positions,
                                                     reply,
-                                                ));
-                                            } else {
-                                                // fall back: run separately
-                                                let obs_batch = Array::from_slice(
-                                                    &obs,
-                                                    &[batch as i32, next_obs as i32],
-                                                );
-                                                let (policy, values) = net.predict_batch(&obs_batch);
-                                                #[cfg(feature = "profiling")]
-                                                {
-                                                    PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
-                                                    PROF.mcts_nn_positions
-                                                        .fetch_add(positions as u64, Ordering::Relaxed);
-                                                    PROF.mcts_nn_evals
-                                                        .fetch_add(eval_count as u64, Ordering::Relaxed);
-                                                }
-                                                let _ = reply.send((
-                                                    policy.as_slice::<f32>().to_vec(),
-                                                    values.as_slice::<f32>().to_vec(),
-                                                ));
+                                                });
                                             }
-                                        }
-                                        WorkerMsg::UpdateNet(new_net) => {
-                                            net = new_net;
+                                        } else {
+                                            backlog.push_back(WorkerMsg::Infer {
+                                                obs,
+                                                batch,
+                                                obs_size: next_obs,
+                                                max_batch: next_max,
+                                                eval_count,
+                                                positions,
+                                                reply,
+                                            });
                                         }
                                     }
-                                } else {
-                                    break;
-                                }
+                                    WorkerMsg::UpdateNet(new_net) => {
+                                        net = new_net;
+                                    }
+                                },
+                                Err(mpsc::TryRecvError::Empty) => break,
+                                Err(mpsc::TryRecvError::Disconnected) => return,
                             }
                         }
-                        let total_batch: usize = reqs.iter().map(|(_, b, _, _, _, _, _)| *b).sum();
-                        let _total_positions: usize =
-                            reqs.iter().map(|(_, _, _, _, _, p, _)| *p).sum();
-                        let _total_evals: usize =
-                            reqs.iter().map(|(_, _, _, _, e, _, _)| *e).sum();
+
+                        let total_batch = total_req_batch;
+                        #[cfg(feature = "profiling")]
+                        let (total_positions, total_evals) =
+                            reqs.iter().fold((0usize, 0usize), |(p, e), r| {
+                                (p + r.positions, e + r.eval_count)
+                            });
                         let mut obs_concat = Vec::with_capacity(total_batch * obs_size);
-                        let mut splits: Vec<usize> = Vec::with_capacity(reqs.len());
-                        for (obs, b, _, _, _, _, _) in reqs.iter() {
-                            obs_concat.extend_from_slice(obs);
-                            splits.push(*b);
+                        for r in reqs.iter() {
+                            obs_concat.extend_from_slice(&r.obs);
                         }
 
-                        let obs_batch = Array::from_slice(&obs_concat, &[total_batch as i32, obs_size as i32]);
+                        let obs_batch =
+                            Array::from_slice(&obs_concat, &[total_batch as i32, obs_size as i32]);
                         #[cfg(feature = "profiling")]
                         let worker_start = std::time::Instant::now();
                         let (policy, values) = net.predict_batch(&obs_batch);
+                        // MLX arrays are lazy; evaluate both outputs together to avoid redundant work
+                        // and extra synchronization points.
+                        mlx_rs::transforms::eval([&policy, &values])
+                            .expect("Failed to eval NN outputs");
                         #[cfg(feature = "profiling")]
                         {
                             let worker_elapsed = worker_start.elapsed().as_nanos() as u64;
@@ -285,9 +357,9 @@ where
                         {
                             PROF.mcts_nn_batches.fetch_add(1, Ordering::Relaxed);
                             PROF.mcts_nn_positions
-                                .fetch_add(_total_positions as u64, Ordering::Relaxed);
+                                .fetch_add(total_positions as u64, Ordering::Relaxed);
                             PROF.mcts_nn_evals
-                                .fetch_add(_total_evals as u64, Ordering::Relaxed);
+                                .fetch_add(total_evals as u64, Ordering::Relaxed);
                         }
                         let logits_all = policy.as_slice::<f32>().to_vec();
                         let values_all = values.as_slice::<f32>().to_vec();
@@ -295,13 +367,15 @@ where
                         // Dispatch slices back
                         let mut logits_off = 0;
                         let mut values_off = 0;
-                        for ((_, _, _, _, _, _, reply), b) in reqs.into_iter().zip(splits.into_iter()) {
-                            let logits_len = b * ACTION_SPACE_SIZE;
-                            let logits_slice = logits_all[logits_off..logits_off + logits_len].to_vec();
-                            let values_slice = values_all[values_off..values_off + b].to_vec();
-                            let _ = reply.send((logits_slice, values_slice));
+                        for r in reqs.into_iter() {
+                            let logits_len = r.batch * ACTION_SPACE_SIZE;
+                            let logits_slice =
+                                logits_all[logits_off..logits_off + logits_len].to_vec();
+                            let values_slice =
+                                values_all[values_off..values_off + r.batch].to_vec();
+                            let _ = r.reply.send((logits_slice, values_slice));
                             logits_off += logits_len;
-                            values_off += b;
+                            values_off += r.batch;
                         }
 
                         #[cfg(feature = "profiling")]
@@ -405,9 +479,9 @@ pub type NodeIdx = u32;
 #[derive(Clone, Debug)]
 pub struct ChildEdge {
     pub action_id: ActionId,
-    pub prior: f32,             // P(s, a)
-    pub visit_count: u32,       // N(s, a)
-    pub value_sum: f32,         // W(s, a), sum of backed-up values
+    pub prior: f32,       // P(s, a)
+    pub visit_count: u32, // N(s, a)
+    pub value_sum: f32,   // W(s, a), sum of backed-up values
     /// Immediate reward for this transition, from the parent node's perspective.
     /// Populated the first time the edge is expanded (child is created).
     pub reward: f32,
@@ -583,7 +657,12 @@ where
 
     /// Select a leaf node for evaluation, applying virtual loss along the path.
     /// Creates stub nodes for unexpanded edges.
-    fn select_leaf(&mut self, tree: &mut MctsTree, root_idx: NodeIdx, rng: &mut impl Rng) -> PendingSim {
+    fn select_leaf(
+        &mut self,
+        tree: &mut MctsTree,
+        root_idx: NodeIdx,
+        rng: &mut impl Rng,
+    ) -> PendingSim {
         let mut path: Vec<PathStep> = Vec::new();
         let mut current_idx = root_idx;
 
@@ -634,7 +713,13 @@ where
                 let my_before = parent.state.players[parent_to_play as usize].score as f32;
                 let opp_before = parent.state.players[1 - parent_to_play as usize].score as f32;
                 let action_id = parent.children[child_idx].action_id;
-                (parent.state.clone(), parent_to_play, action_id, my_before, opp_before)
+                (
+                    parent.state.clone(),
+                    parent_to_play,
+                    action_id,
+                    my_before,
+                    opp_before,
+                )
             };
             let action = ActionEncoder::decode(action_id);
 
@@ -662,8 +747,8 @@ where
         PendingSim {
             path,
             leaf_idx: current_idx,
-            leaf_value: 0.0,  // filled later
-            eval_slot: None,  // filled later
+            leaf_value: 0.0, // filled later
+            eval_slot: None, // filled later
         }
     }
 
@@ -713,16 +798,23 @@ where
             let (logits_vec, values_vec) = {
                 #[cfg(feature = "profiling")]
                 let _t = Timer::new(&PROF.time_mcts_nn_eval_ns);
-                let max_batch = (self.config.nn_batch_size.max(b) * 2).max(1);
-                self.inference
-                    .infer(
-                        obs_scratch.clone(),
-                        b,
-                        obs_size,
-                        max_batch,
-                        unique_leafs.len(),
-                        b,
-                    )
+                // Allow the shared inference worker to coalesce across parallel self-play games.
+                // Bigger batches amortize MLX/Metal sync overhead.
+                let max_batch = self
+                    .config
+                    .nn_batch_size
+                    .max(b)
+                    .saturating_mul(8)
+                    .max(1)
+                    .min(512);
+                self.inference.infer(
+                    obs_scratch.clone(),
+                    b,
+                    obs_size,
+                    max_batch,
+                    unique_leafs.len(),
+                    b,
+                )
             };
             let logits = &logits_vec;
             let values = &values_vec;
@@ -753,7 +845,8 @@ where
 
             // Clear pending flag on the edge that led to this leaf
             if let Some(last_step) = sim.path.last() {
-                tree.nodes[last_step.node_idx as usize].children[last_step.child_idx].pending = false;
+                tree.nodes[last_step.node_idx as usize].children[last_step.child_idx].pending =
+                    false;
             }
         }
     }
@@ -784,9 +877,15 @@ where
             let (logits_vec, values_vec) = {
                 #[cfg(feature = "profiling")]
                 let _t = Timer::new(&PROF.time_mcts_nn_eval_ns);
-                let max_batch = (self.config.nn_batch_size.max(1) * 2).max(1);
-                self.inference
-                    .infer(obs_data, 1, obs_size, max_batch, 1, 1)
+                // See process_batch(): keep headroom for cross-game coalescing.
+                let max_batch = self
+                    .config
+                    .nn_batch_size
+                    .max(1)
+                    .saturating_mul(8)
+                    .max(1)
+                    .min(512);
+                self.inference.infer(obs_data, 1, obs_size, max_batch, 1, 1)
             };
 
             let logits_row = &logits_vec[0..ACTION_SPACE_SIZE];
@@ -946,7 +1045,11 @@ fn backup_with_virtual_loss(tree: &mut MctsTree, path: &[PathStep], leaf_value: 
             let child_idx = edge
                 .child
                 .expect("backup path must reference an expanded child node");
-            (parent.to_play, tree.nodes[child_idx as usize].to_play, edge.reward)
+            (
+                parent.to_play,
+                tree.nodes[child_idx as usize].to_play,
+                edge.reward,
+            )
         };
 
         // Transform from child perspective -> parent perspective.
@@ -1796,7 +1899,11 @@ mod tests {
         assert!(legal.contains(&bad_action), "bad_action should be legal");
         assert!(legal.contains(&good_action), "good_action should be legal");
 
-        fn reward_from_parent_perspective(parent: &GameState, child: &GameState, to_play: u8) -> f32 {
+        fn reward_from_parent_perspective(
+            parent: &GameState,
+            child: &GameState,
+            to_play: u8,
+        ) -> f32 {
             let my_before = parent.players[to_play as usize].score as f32;
             let opp_before = parent.players[1 - to_play as usize].score as f32;
             let my_after = child.players[to_play as usize].score as f32;
