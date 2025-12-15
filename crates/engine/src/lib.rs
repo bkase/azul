@@ -251,7 +251,7 @@ pub struct PlayerState {
     pub wall: Wall,
     pub pattern_lines: [PatternLine; BOARD_SIZE],
     pub floor: FloorLine,
-    pub score: i16, // clamp at >=0 on updates
+    pub score: i16, // can go negative from floor penalties
 }
 
 impl Default for PlayerState {
@@ -693,7 +693,7 @@ fn resolve_end_of_round(state: &mut GameState, rng: &mut impl Rng) -> Option<[i1
 
                 // Score placement
                 let delta = score_placement(&player.wall, r, col);
-                player.score = (player.score + delta).max(0);
+                player.score += delta;
 
                 // Discard remaining tiles (cap - 1)
                 let tiles_to_discard = cap - 1;
@@ -714,24 +714,20 @@ fn resolve_end_of_round(state: &mut GameState, rng: &mut impl Rng) -> Option<[i1
         }
     }
 
-    // Step 2: Floor penalties and cleanup
+    // Step 2: Floor cleanup (penalties already applied immediately when tiles were placed)
+    // We only need to discard tiles and detect first player marker here.
     for p in 0..state.num_players as usize {
         let player = &mut state.players[p];
         let mut fp_marker_here = false;
 
-        for (slot, &penalty) in player.floor.slots[..player.floor.len as usize]
-            .iter()
-            .zip(FLOOR_PENALTY.iter())
-        {
+        for slot in player.floor.slots[..player.floor.len as usize].iter() {
             match *slot {
                 Token::Tile(color) => {
-                    let penalty = penalty as i16;
-                    player.score = (player.score + penalty).max(0);
+                    // Discard tile (penalty was already applied when placed)
                     state.supply.discard[color as usize] += 1;
                 }
                 Token::FirstPlayerMarker => {
-                    let penalty = penalty as i16;
-                    player.score = (player.score + penalty).max(0);
+                    // Penalty was already applied when placed
                     fp_marker_here = true;
                 }
             }
@@ -848,9 +844,14 @@ pub fn apply_action(
     let player = &mut state.players[p];
 
     // Helper to add tile to floor (with overflow to discard)
+    // IMPORTANT: Floor penalties are applied IMMEDIATELY when tiles are placed,
+    // not at end of round. This gives MCTS/RL agents immediate negative signal.
     let add_to_floor = |player: &mut PlayerState, supply: &mut TileSupply, token: Token| {
         if player.floor.len < FLOOR_CAPACITY as u8 {
-            player.floor.slots[player.floor.len as usize] = token;
+            let slot_idx = player.floor.len as usize;
+            player.floor.slots[slot_idx] = token;
+            // Apply penalty immediately for this slot
+            player.score += FLOOR_PENALTY[slot_idx] as i16;
             player.floor.len += 1;
         } else {
             // Overflow: discard tile (marker never discarded but also doesn't overflow in practice)
@@ -1247,44 +1248,122 @@ mod tests {
     }
 
     #[test]
-    fn test_floor_penalty_score_clamp() {
-        // Create a state where player has low score and full floor
+    fn test_floor_penalty_allows_negative_scores() {
+        // Verify that floor penalties can cause negative scores.
+        // With immediate penalties, we test this via apply_action.
         let mut rng = StdRng::seed_from_u64(42);
         let mut state = new_game(2, 0, &mut rng);
 
-        // Manually set up a floor scenario
-        state.players[0].score = 5; // Low score
-        state.players[0].floor.len = 7;
-        for i in 0..7 {
-            state.players[0].floor.slots[i] = Token::Tile(Color::Blue);
-        }
+        // Set player to low score
+        state.players[0].score = 3;
 
-        // The score should clamp to 0, not go negative
-        // We test this indirectly by checking that scores >= 0 throughout game
-        let mut test_rng = StdRng::seed_from_u64(999);
-        let mut game_state = new_game(2, 0, &mut test_rng);
+        // Add a tile to center so we can pick from it
+        state.center.items[state.center.len as usize] = Token::Tile(Color::Blue);
+        state.center.len += 1;
+        state.center.items[state.center.len as usize] = Token::Tile(Color::Blue);
+        state.center.len += 1;
+        state.center.items[state.center.len as usize] = Token::Tile(Color::Blue);
+        state.center.len += 1;
+        state.center.items[state.center.len as usize] = Token::Tile(Color::Blue);
+        state.center.len += 1;
+        state.center.items[state.center.len as usize] = Token::Tile(Color::Blue);
+        state.center.len += 1;
 
-        for _ in 0..200 {
-            if game_state.phase == Phase::GameOver {
-                break;
-            }
+        // Pick tiles to floor (will get 5 tiles + first player marker = 6 items)
+        // Penalties: -1 -1 -2 -2 -2 -3 = -11 for first 6 slots
+        let action = Action {
+            source: DraftSource::Center,
+            color: Color::Blue,
+            dest: DraftDestination::Floor,
+        };
 
-            // Verify scores never negative
-            for p in 0..game_state.num_players as usize {
-                assert!(
-                    game_state.players[p].score >= 0,
-                    "Score should never be negative"
-                );
-            }
+        let result = apply_action(state, action, &mut rng).unwrap();
 
-            let actions = legal_actions(&game_state);
-            if actions.is_empty() {
-                break;
-            }
-            let action_idx = test_rng.random_range(0..actions.len() as u32) as usize;
-            let result = apply_action(game_state, actions[action_idx], &mut test_rng).unwrap();
-            game_state = result.state;
-        }
+        // Score should now be negative: 3 + (-1 -1 -2 -2 -2 -3) = 3 - 11 = -8
+        assert!(
+            result.state.players[0].score < 0,
+            "Score should be allowed to go negative; got {}",
+            result.state.players[0].score
+        );
+        assert_eq!(
+            result.state.players[0].score, -8,
+            "Score should be 3 - 11 = -8, got {}",
+            result.state.players[0].score
+        );
+    }
+
+    /// Test A: Immediate floor penalty - verify score decreases immediately when tiles placed
+    #[test]
+    fn test_immediate_floor_penalty() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut state = new_game(2, 0, &mut rng);
+
+        // Record initial score
+        let initial_score = state.players[0].score;
+        assert_eq!(initial_score, 0, "Initial score should be 0");
+
+        // Add exactly 1 tile to center
+        state.center.items[state.center.len as usize] = Token::Tile(Color::Red);
+        state.center.len += 1;
+
+        // Pick that single tile and send it to floor
+        let action = Action {
+            source: DraftSource::Center,
+            color: Color::Red,
+            dest: DraftDestination::Floor,
+        };
+
+        let result = apply_action(state, action, &mut rng).unwrap();
+
+        // The single tile goes to floor slot 0, plus first player marker goes to slot 1
+        // Penalties: slot 0 = -1, slot 1 = -1 (for FP marker)
+        // Total immediate penalty = -2
+        assert_eq!(
+            result.state.players[0].score, -2,
+            "Score should be -2 after placing 1 tile + FP marker on floor (slots 0 and 1), got {}",
+            result.state.players[0].score
+        );
+
+        // Verify floor has 2 items (tile + FP marker)
+        assert_eq!(
+            result.state.players[0].floor.len, 2,
+            "Floor should have 2 items"
+        );
+    }
+
+    /// Test B: No double-penalty - verify resolve_end_of_round doesn't change score
+    #[test]
+    fn test_no_double_floor_penalty() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut state = new_game(2, 0, &mut rng);
+
+        // Manually place tiles on floor WITH the penalty already applied
+        // (simulating what would have happened during apply_action)
+        state.players[0].floor.len = 3;
+        state.players[0].floor.slots[0] = Token::Tile(Color::Blue);
+        state.players[0].floor.slots[1] = Token::Tile(Color::Red);
+        state.players[0].floor.slots[2] = Token::Tile(Color::Yellow);
+
+        // Set score as if penalties were already applied: -1 -1 -2 = -4
+        state.players[0].score = -4;
+
+        // Record score before resolve_end_of_round
+        let score_before = state.players[0].score;
+
+        // Call resolve_end_of_round
+        let _final = resolve_end_of_round(&mut state, &mut rng);
+
+        // Score should NOT have changed (penalties already applied)
+        assert_eq!(
+            state.players[0].score, score_before,
+            "resolve_end_of_round should NOT apply floor penalties again. \
+             Score was {} before, {} after",
+            score_before,
+            state.players[0].score
+        );
+
+        // Floor should be cleared
+        assert_eq!(state.players[0].floor.len, 0, "Floor should be cleared");
     }
 
     // =========================================================================

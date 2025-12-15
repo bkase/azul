@@ -738,7 +738,17 @@ mod tests {
             avg_steps < 500.0,
             "Episodes should take fewer than 500 steps"
         );
-        assert!(avg_score_p0 > 0.0, "Average score should be positive");
-        assert!(avg_score_p1 > 0.0, "Average score should be positive");
+        // Note: With immediate floor penalties, random play often produces negative scores.
+        // This is expected behavior - random agents frequently place tiles on the floor,
+        // and those penalties now fire immediately instead of being deferred to end-of-round.
+        // The important check is that games complete; score quality depends on policy quality.
+        assert!(
+            avg_score_p0 > -100.0 && avg_score_p0 < 200.0,
+            "Scores should be in reasonable range"
+        );
+        assert!(
+            avg_score_p1 > -100.0 && avg_score_p1 < 200.0,
+            "Scores should be in reasonable range"
+        );
     }
 }

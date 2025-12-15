@@ -17,7 +17,7 @@ use mlx_rs::transforms::eval_params;
 use mlx_rs::Array;
 use rand::{Rng, RngCore, SeedableRng};
 use rayon::prelude::*;
-use azul_engine::{DraftDestination, Phase};
+use azul_engine::{DraftDestination, Phase, BOARD_SIZE};
 
 use super::{PendingMove, ReplayBuffer, TrainingExample};
 use crate::{
@@ -43,6 +43,13 @@ pub struct SelfPlayResult {
     /// Number of moves that went to the floor.
     pub floor_moves: usize,
 
+    /// Number of moves that went to floor when a non-floor option existed.
+    /// This distinguishes "forced floor" (no alternative) from "chosen floor" (policy collapsed).
+    pub optional_floor_moves: usize,
+
+    /// Number of wall tiles placed during the game (across all players).
+    pub wall_tiles_placed: usize,
+
     /// True if the game was truncated (hit max_moves limit).
     pub was_truncated: bool,
 
@@ -51,6 +58,15 @@ pub struct SelfPlayResult {
 
     /// Number of players in the game.
     pub num_players: u8,
+
+    /// Sum of floor mass in MCTS policy across all moves.
+    /// floor_mass = sum(pi[a] for legal a where decode(a).dest==Floor)
+    /// This helps distinguish whether floor is favored by search (high mass)
+    /// vs just sampling noise (low mass but floor still chosen).
+    pub total_floor_policy_mass: f32,
+
+    /// Number of moves used to compute floor policy mass (for averaging).
+    pub num_moves_for_floor_mass: usize,
 }
 
 /// Output of an MCTS search at the root.
@@ -90,7 +106,10 @@ impl Default for SelfPlayConfig {
             mcts_simulations: 256,
             dirichlet_alpha: 0.3,
             dirichlet_eps: 0.25,
-            temp_cutoff_move: 30,
+            // Use high cutoff (200) so tau=1 for entire game during early training.
+            // This prevents "locking in" garbage moves early via argmax selection.
+            // With ~65 moves per game, this effectively means tau=1 throughout.
+            temp_cutoff_move: 200,
         }
     }
 }
@@ -262,6 +281,49 @@ pub trait TrainableModel {
     fn load(&mut self, path: &std::path::Path) -> std::io::Result<()>;
 }
 
+/// Count the total number of tiles placed on walls across all players.
+fn count_wall_tiles(game: &azul_engine::GameState) -> usize {
+    let mut count = 0;
+    for p in 0..game.num_players as usize {
+        for row in 0..BOARD_SIZE {
+            for col in 0..BOARD_SIZE {
+                if game.players[p].wall[row][col].is_some() {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Check if any legal action is a non-floor destination.
+fn has_non_floor_legal_action(legal_mask: &[bool]) -> bool {
+    for (action_id, &is_legal) in legal_mask.iter().enumerate() {
+        if is_legal {
+            let action = ActionEncoder::decode(action_id as u16);
+            if !matches!(action.dest, DraftDestination::Floor) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Compute the total policy mass on floor actions.
+/// floor_mass = sum(pi[a] for legal a where decode(a).dest==Floor)
+fn compute_floor_policy_mass(policy: &[f32], legal_mask: &[bool]) -> f32 {
+    let mut floor_mass = 0.0f32;
+    for (action_id, (&prob, &is_legal)) in policy.iter().zip(legal_mask.iter()).enumerate() {
+        if is_legal {
+            let action = ActionEncoder::decode(action_id as u16);
+            if matches!(action.dest, DraftDestination::Floor) {
+                floor_mass += prob;
+            }
+        }
+    }
+    floor_mass
+}
+
 /// Run a single self-play game and return training examples with diagnostic stats.
 ///
 /// Uses the MCTS agent to play against itself, recording (observation, policy, value)
@@ -284,10 +346,24 @@ where
     let mut moves: Vec<PendingMove> = Vec::new();
     let mut move_idx = 0usize;
 
+    // Track wall tiles at start for computing tiles placed during game
+    let wall_tiles_start = count_wall_tiles(&env.game_state);
+
+    // Track floor moves with their context for optional_floor detection
+    let mut floor_move_indices: Vec<usize> = Vec::new();
+    let mut had_non_floor_alternative: Vec<bool> = Vec::new();
+
+    // Track floor policy mass (sum of pi[a] for floor actions in each move's policy)
+    let mut total_floor_policy_mass = 0.0f32;
+    let mut num_moves_for_floor_mass = 0usize;
+
     // 2. Play game
     while !step.done && move_idx < self_play_cfg.max_moves {
         let acting_player = step.current_player;
         let p = acting_player as usize;
+
+        // Check if non-floor alternatives exist BEFORE making the move
+        let non_floor_exists = has_non_floor_legal_action(&step.legal_action_mask);
 
         // Build AgentInput (with full state if available)
         let input = AgentInput {
@@ -306,6 +382,21 @@ where
 
         // Select action + policy via MCTS
         let search_result = agent.select_action_and_policy(&input, temperature, rng);
+
+        // Track floor policy mass in the MCTS-returned policy
+        let floor_mass = compute_floor_policy_mass(&search_result.policy, &step.legal_action_mask);
+        total_floor_policy_mass += floor_mass;
+        num_moves_for_floor_mass += 1;
+
+        // Track floor moves and whether they were optional
+        let is_floor_move = matches!(
+            ActionEncoder::decode(search_result.action).dest,
+            DraftDestination::Floor
+        );
+        if is_floor_move {
+            floor_move_indices.push(moves.len());
+            had_non_floor_alternative.push(non_floor_exists);
+        }
 
         // Step env
         let next = env
@@ -350,6 +441,14 @@ where
     let final_scores: Vec<i16> = (0..n).map(|p| env.game_state.players[p].score).collect();
     let was_truncated = env.game_state.phase != Phase::GameOver;
 
+    // Count wall tiles at end and compute tiles placed
+    let wall_tiles_end = count_wall_tiles(&env.game_state);
+    let wall_tiles_placed = wall_tiles_end.saturating_sub(wall_tiles_start);
+
+    // Count floor moves and optional floor moves
+    let floor_moves = floor_move_indices.len();
+    let optional_floor_moves = had_non_floor_alternative.iter().filter(|&&x| x).count();
+
     // 4. Compute discounted returns for each pending move (terminal value = 0).
     //
     // IMPORTANT: Our per-step reward is defined as the *change* in normalized
@@ -377,9 +476,7 @@ where
     // Keep terminal score outcomes for diagnostics/logging.
     let _outcomes = compute_outcomes_from_scores(&final_scores);
 
-    // 5. Count floor moves and convert PendingMove -> TrainingExample
-    let mut floor_moves = 0usize;
-
+    // 5. Convert PendingMove -> TrainingExample
     // Force evaluation of observations before storing in replay buffer.
     // MLX arrays are lazy - without eval(), the underlying event/stream tracking
     // can become invalid when arrays are stored for a long time.
@@ -387,14 +484,6 @@ where
         .into_iter()
         .zip(values.into_iter())
         .map(|(m, value)| {
-            // Count floor moves
-            if matches!(
-                ActionEncoder::decode(m.action).dest,
-                DraftDestination::Floor
-            ) {
-                floor_moves += 1;
-            }
-
             m.observation.eval().expect("Failed to evaluate observation");
             TrainingExample {
                 observation: m.observation,
@@ -408,9 +497,13 @@ where
     SelfPlayResult {
         examples,
         floor_moves,
+        optional_floor_moves,
+        wall_tiles_placed,
         was_truncated,
         final_scores,
         num_players,
+        total_floor_policy_mass,
+        num_moves_for_floor_mass,
     }
 }
 
@@ -510,17 +603,25 @@ where
             let mut sp_games = 0usize;
             let mut sp_moves = 0usize;
             let mut sp_floor_moves = 0usize;
+            let mut sp_optional_floor_moves = 0usize;
+            let mut sp_wall_tiles_placed = 0usize;
             let mut sp_truncated_games = 0usize;
             let mut sp_ties = 0usize;
             let mut sp_zero_zero_games = 0usize;
             let mut sp_score_diff_sum = 0.0f32;
             let mut sp_abs_score_diff_sum = 0.0f32;
             let mut sp_abs_z_sum = 0.0f32;
+            let mut sp_total_floor_policy_mass = 0.0f32;
+            let mut sp_total_moves_for_floor_mass = 0usize;
 
             for result in results {
                 sp_games += 1;
                 sp_moves += result.examples.len();
                 sp_floor_moves += result.floor_moves;
+                sp_optional_floor_moves += result.optional_floor_moves;
+                sp_wall_tiles_placed += result.wall_tiles_placed;
+                sp_total_floor_policy_mass += result.total_floor_policy_mass;
+                sp_total_moves_for_floor_mass += result.num_moves_for_floor_mass;
 
                 if result.was_truncated {
                     sp_truncated_games += 1;
@@ -555,7 +656,12 @@ where
                         .fetch_add(result.examples.len() as u64, Ordering::Relaxed);
                 }
 
-                self.replay.extend(result.examples);
+                // Skip truncated games - they poison the replay buffer with
+                // degenerate data (stalling strategies, bad value targets).
+                // Only add examples from games that reached GameOver naturally.
+                if !result.was_truncated {
+                    self.replay.extend(result.examples);
+                }
             }
 
             // Drop timer to record self-play time before training starts
@@ -616,6 +722,19 @@ where
                 } else {
                     0.0
                 };
+                // Optional floor: floor moves where a non-floor alternative existed
+                let opt_floor_pct = if sp_floor_moves > 0 {
+                    100.0 * (sp_optional_floor_moves as f32) / (sp_floor_moves as f32)
+                } else {
+                    0.0
+                };
+                // Mean floor policy mass: average fraction of MCTS policy mass on floor actions
+                let mean_floor_policy_mass = if sp_total_moves_for_floor_mass > 0 {
+                    100.0 * sp_total_floor_policy_mass / (sp_total_moves_for_floor_mass as f32)
+                } else {
+                    0.0
+                };
+                let wall_tiles_per_game = sp_wall_tiles_placed as f32 / sp_games_f;
                 let trunc_pct = 100.0 * (sp_truncated_games as f32) / sp_games_f;
                 let abs_z = sp_abs_z_sum / sp_games_f;
 
@@ -633,13 +752,16 @@ where
                 };
 
                 eprintln!(
-                    "Iter {}/{} | replay: {} | loss: {:.4} | sp: moves/g={:.1} floor={:.1}% |z|={:.3} trunc={:.1}%{}",
+                    "Iter {}/{} | replay: {} | loss: {:.4} | sp: moves/g={:.1} floor={:.1}% opt_floor={:.1}% pi_floor={:.1}% wall={:.1} |z|={:.3} trunc={:.1}%{}",
                     iter,
                     self.cfg.num_iters,
                     self.replay.len(),
                     avg_loss,
                     moves_per_game,
                     floor_pct,
+                    opt_floor_pct,
+                    mean_floor_policy_mass,
+                    wall_tiles_per_game,
                     abs_z,
                     trunc_pct,
                     two_player_stats
