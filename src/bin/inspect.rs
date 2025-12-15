@@ -42,14 +42,15 @@ struct Args {
 
 /// Create a controlled "sanity check" scenario where there's an obvious good move.
 /// Player 0 has an empty pattern line (row 0, capacity 1).
-/// Factory 0 has 4 Red tiles.
-/// Taking Red from Factory 0 to Line 1 is clearly the best move.
+/// Factory 0 has [Red, Blue, Blue, Blue] - so taking Red gives exactly 1 tile.
+/// Taking Red from Factory 0 to Line 1 is clearly the best move (no overflow to floor).
 fn create_controlled_scenario(rng: &mut impl rand::Rng) -> GameState {
     let mut state = new_game(2, 0, rng);
 
-    // Clear factory 0 and fill with Red tiles
+    // Clear factory 0 and fill with 1 Red + 3 Blue tiles
+    // This ensures taking Red gives exactly 1 tile (fits Line 1 perfectly)
     state.factories.factories[0].len = 4;
-    state.factories.factories[0].tiles = [Color::Red; 4];
+    state.factories.factories[0].tiles = [Color::Red, Color::Blue, Color::Blue, Color::Blue];
 
     // Clear player 0's pattern line row 0
     state.players[0].pattern_lines[0].count = 0;
@@ -83,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set up MCTS agent with high simulations and no noise for analysis
     let mcts_config = MctsConfig {
         num_simulations: args.mcts_sims as u32,
-        temperature: 0.0, // Argmax for deterministic selection
+        temperature: 0.0,          // Argmax for deterministic selection
         root_dirichlet_alpha: 0.0, // No exploration noise
         ..Default::default()
     };
@@ -94,7 +95,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create game state
     let state = if args.controlled {
         println!("\n{BOLD}=== CONTROLLED SCENARIO ==={RESET}");
-        println!("Expectation: Agent should take Red from F0 to Line 1");
+        println!(
+            "Expectation: Agent should take Red from F0 to Line 1 (exactly 1 tile, perfect fit)"
+        );
         create_controlled_scenario(&mut rng)
     } else {
         println!("\n{BOLD}=== RANDOM GAME STATE ==={RESET}");
@@ -145,7 +148,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check if priors are roughly uniform (indicating no learning)
     let prior_variance: f32 = {
         let mean = legal_priors.iter().map(|(_, p)| p).sum::<f32>() / legal_priors.len() as f32;
-        legal_priors.iter().map(|(_, p)| (p - mean).powi(2)).sum::<f32>() / legal_priors.len() as f32
+        legal_priors
+            .iter()
+            .map(|(_, p)| (p - mean).powi(2))
+            .sum::<f32>()
+            / legal_priors.len() as f32
     };
     let prior_std = prior_variance.sqrt();
     println!("\nPrior statistics:");
@@ -164,7 +171,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .count();
     if floor_in_top5 > 0 {
-        println!("  WARNING: {} floor action(s) in top 5 priors!", floor_in_top5);
+        println!(
+            "  WARNING: {} floor action(s) in top 5 priors!",
+            floor_in_top5
+        );
     }
 
     // Run MCTS search
@@ -189,7 +199,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mcts_moves.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     println!("\nTop MCTS Actions (by visit count policy):");
-    println!("{:<6} {:<25} {:<12} {:<12}", "Rank", "Action", "MCTS Prob", "Net Prior");
+    println!(
+        "{:<6} {:<25} {:<12} {:<12}",
+        "Rank", "Action", "MCTS Prob", "Net Prior"
+    );
     println!("{}", "-".repeat(60));
     for (rank, (action_id, mcts_prob)) in mcts_moves.iter().take(10).enumerate() {
         let action = ActionEncoder::decode(*action_id as u16);

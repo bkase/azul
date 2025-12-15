@@ -20,8 +20,8 @@ pub struct Counters {
     pub mcts_simulations: AtomicU64,
     pub mcts_nodes_created: AtomicU64,
     pub mcts_nn_evals: AtomicU64,
-    pub mcts_nn_batches: AtomicU64,    // number of predict_batch calls
-    pub mcts_nn_positions: AtomicU64,  // total positions evaluated (sum of batch sizes)
+    pub mcts_nn_batches: AtomicU64,   // number of predict_batch calls
+    pub mcts_nn_positions: AtomicU64, // total positions evaluated (sum of batch sizes)
     pub train_steps: AtomicU64,
     pub fd_forward_evals: AtomicU64,
     pub env_steps: AtomicU64,
@@ -199,18 +199,54 @@ pub fn print_summary() {
     eprintln!("  NN batch forwards:   {:>12}", nn_batch_forwards);
 
     eprintln!("\nTime Breakdown:");
-    eprintln!("  Self-play total:      {:>10.3} s", ns_to_sec(time_self_play_ns));
-    eprintln!("  Training total:       {:>10.3} s", ns_to_sec(time_training_ns));
-    eprintln!("  MCTS search total:    {:>10.3} s", ns_to_sec(time_mcts_search_ns));
-    eprintln!("  MCTS simulate total:  {:>10.3} s", ns_to_sec(time_mcts_simulate_ns));
-    eprintln!("  MCTS NN eval total:   {:>10.3} s", ns_to_sec(time_mcts_nn_eval_ns));
-    eprintln!("  Training step total:  {:>10.3} s", ns_to_sec(time_training_step_ns));
-    eprintln!("  FD gradient total:    {:>10.3} s", ns_to_sec(time_fd_grad_ns));
-    eprintln!("  Env step total:       {:>10.3} s", ns_to_sec(time_env_step_ns));
-    eprintln!("  Env reset total:      {:>10.3} s", ns_to_sec(time_env_reset_ns));
-    eprintln!("  Iter wall total:      {:>10.3} s", ns_to_sec(time_iter_wall_ns));
-    eprintln!("  NN worker total:      {:>10.3} s", ns_to_sec(time_nn_worker_ns));
-    eprintln!("  NN worker queue:      {:>10.3} s", ns_to_sec(time_nn_worker_queue_ns));
+    eprintln!(
+        "  Self-play total:      {:>10.3} s",
+        ns_to_sec(time_self_play_ns)
+    );
+    eprintln!(
+        "  Training total:       {:>10.3} s",
+        ns_to_sec(time_training_ns)
+    );
+    eprintln!(
+        "  MCTS search total:    {:>10.3} s",
+        ns_to_sec(time_mcts_search_ns)
+    );
+    eprintln!(
+        "  MCTS simulate total:  {:>10.3} s",
+        ns_to_sec(time_mcts_simulate_ns)
+    );
+    eprintln!(
+        "  MCTS NN eval total:   {:>10.3} s",
+        ns_to_sec(time_mcts_nn_eval_ns)
+    );
+    eprintln!(
+        "  Training step total:  {:>10.3} s",
+        ns_to_sec(time_training_step_ns)
+    );
+    eprintln!(
+        "  FD gradient total:    {:>10.3} s",
+        ns_to_sec(time_fd_grad_ns)
+    );
+    eprintln!(
+        "  Env step total:       {:>10.3} s",
+        ns_to_sec(time_env_step_ns)
+    );
+    eprintln!(
+        "  Env reset total:      {:>10.3} s",
+        ns_to_sec(time_env_reset_ns)
+    );
+    eprintln!(
+        "  Iter wall total:      {:>10.3} s",
+        ns_to_sec(time_iter_wall_ns)
+    );
+    eprintln!(
+        "  NN worker total:      {:>10.3} s",
+        ns_to_sec(time_nn_worker_ns)
+    );
+    eprintln!(
+        "  NN worker queue:      {:>10.3} s",
+        ns_to_sec(time_nn_worker_queue_ns)
+    );
 
     eprintln!("\nDerived Metrics:");
 

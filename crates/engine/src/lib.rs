@@ -1358,8 +1358,7 @@ mod tests {
             state.players[0].score, score_before,
             "resolve_end_of_round should NOT apply floor penalties again. \
              Score was {} before, {} after",
-            score_before,
-            state.players[0].score
+            score_before, state.players[0].score
         );
 
         // Floor should be cleared

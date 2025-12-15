@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use azul_engine::{DraftDestination, DraftSource, GameState, Phase, Token, BOARD_SIZE};
 use mlx_rs::builder::Builder;
 use mlx_rs::error::Exception;
 use mlx_rs::losses::{LossReduction, MseLossBuilder};
@@ -17,14 +18,12 @@ use mlx_rs::transforms::eval_params;
 use mlx_rs::Array;
 use rand::{Rng, RngCore, SeedableRng};
 use rayon::prelude::*;
-use azul_engine::{DraftDestination, DraftSource, GameState, Phase, Token, BOARD_SIZE};
 
 use super::{PendingMove, ReplayBuffer, TrainingExample};
-use crate::{
-    ActionEncoder, ActionId, AgentInput, AzulEnv, Environment, FeatureExtractor,
-    ACTION_SPACE_SIZE,
-};
 use crate::mcts::InferenceSync;
+use crate::{
+    ActionEncoder, ActionId, AgentInput, AzulEnv, Environment, FeatureExtractor, ACTION_SPACE_SIZE,
+};
 
 #[cfg(feature = "profiling")]
 use crate::profiling::{print_summary, Timer, PROF};
@@ -333,7 +332,11 @@ fn compute_floor_policy_mass(policy: &[f32], legal_mask: &[bool]) -> f32 {
 }
 
 /// Count how many tiles of a given color are available from a source.
-fn count_tiles_from_source(state: &GameState, source: DraftSource, color: azul_engine::Color) -> usize {
+fn count_tiles_from_source(
+    state: &GameState,
+    source: DraftSource,
+    color: azul_engine::Color,
+) -> usize {
     match source {
         DraftSource::Factory(f_idx) => {
             let factory = &state.factories.factories[f_idx as usize];
@@ -342,18 +345,20 @@ fn count_tiles_from_source(state: &GameState, source: DraftSource, color: azul_e
                 .filter(|&&c| c == color)
                 .count()
         }
-        DraftSource::Center => {
-            state.center.items[..state.center.len as usize]
-                .iter()
-                .filter(|t| matches!(t, Token::Tile(c) if *c == color))
-                .count()
-        }
+        DraftSource::Center => state.center.items[..state.center.len as usize]
+            .iter()
+            .filter(|t| matches!(t, Token::Tile(c) if *c == color))
+            .count(),
     }
 }
 
 /// Compute how many tiles would overflow to floor for a given non-floor action.
 /// Returns 0 if the action is Floor (by definition no overflow from placing on floor).
-fn compute_overflow_for_action(state: &GameState, action: &azul_engine::Action, player: usize) -> usize {
+fn compute_overflow_for_action(
+    state: &GameState,
+    action: &azul_engine::Action,
+    player: usize,
+) -> usize {
     let tiles_to_take = count_tiles_from_source(state, action.source, action.color);
 
     match action.dest {
@@ -429,9 +434,10 @@ where
         let non_floor_exists = has_non_floor_legal_action(&step.legal_action_mask);
 
         // Compute min_overflow among non-floor actions (if state available)
-        let min_overflow = step.state.as_ref().and_then(|state| {
-            compute_min_overflow(state, p, &step.legal_action_mask)
-        });
+        let min_overflow = step
+            .state
+            .as_ref()
+            .and_then(|state| compute_min_overflow(state, p, &step.legal_action_mask));
 
         // Build AgentInput (with full state if available)
         let input = AgentInput {
@@ -569,7 +575,9 @@ where
         .into_iter()
         .zip(values.into_iter())
         .map(|(m, value)| {
-            m.observation.eval().expect("Failed to evaluate observation");
+            m.observation
+                .eval()
+                .expect("Failed to evaluate observation");
             TrainingExample {
                 observation: m.observation,
                 policy: m.policy,
@@ -682,7 +690,12 @@ where
                     // Create a thread-local RNG seeded deterministically
                     let mut local_rng = rand::rngs::StdRng::seed_from_u64(seed);
 
-                    self_play_game(&mut local_env, &mut local_agent, &self_play_cfg, &mut local_rng)
+                    self_play_game(
+                        &mut local_env,
+                        &mut local_agent,
+                        &self_play_cfg,
+                        &mut local_rng,
+                    )
                 })
                 .collect();
 
@@ -870,8 +883,7 @@ where
             #[cfg(feature = "profiling")]
             {
                 let elapsed = iter_wall.elapsed().as_nanos() as u64;
-                PROF.time_iter_wall_ns
-                    .fetch_add(elapsed, Ordering::Relaxed);
+                PROF.time_iter_wall_ns.fetch_add(elapsed, Ordering::Relaxed);
             }
         }
 
@@ -1720,24 +1732,23 @@ mod tests {
             let policy_weight = Array::from_slice(&[1.0f32], &[1]);
             let value_weight = Array::from_slice(&[1.0f32], &[1]);
 
-            let loss_fn =
-                |model: &mut AlphaZeroNet, (x, pi, z): (&Array, &Array, &Array)| {
-                    let (policy_logits, value_pred) = model.forward_batch(x);
+            let loss_fn = |model: &mut AlphaZeroNet, (x, pi, z): (&Array, &Array, &Array)| {
+                let (policy_logits, value_pred) = model.forward_batch(x);
 
-                    // Policy loss: cross-entropy
-                    let policy_loss = cross_entropy_loss_array(&policy_logits, pi)?;
+                // Policy loss: cross-entropy
+                let policy_loss = cross_entropy_loss_array(&policy_logits, pi)?;
 
-                    // Value loss: MSE
-                    let value_loss = mse_loss_array(&value_pred, z)?;
+                // Value loss: MSE
+                let value_loss = mse_loss_array(&value_pred, z)?;
 
-                    // Total weighted loss
-                    let total_loss = policy_loss
-                        .multiply(&policy_weight)?
-                        .add(&value_loss.multiply(&value_weight)?)?
-                        .squeeze()?;
+                // Total weighted loss
+                let total_loss = policy_loss
+                    .multiply(&policy_weight)?
+                    .add(&value_loss.multiply(&value_weight)?)?
+                    .squeeze()?;
 
-                    Ok(total_loss)
-                };
+                Ok(total_loss)
+            };
 
             // Compute value and gradients
             let mut vg = mlx_rs::nn::value_and_grad(loss_fn);
@@ -1782,10 +1793,7 @@ mod tests {
             exps[0] / sum
         };
 
-        eprintln!(
-            "Action 0 probability: {:.4} (target: 1.0)",
-            action0_prob
-        );
+        eprintln!("Action 0 probability: {:.4} (target: 1.0)", action0_prob);
         assert!(
             action0_prob > 0.8,
             "Network should learn to assign high probability to action 0, got {:.4}. \

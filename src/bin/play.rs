@@ -86,11 +86,7 @@ fn find_latest_checkpoint() -> Option<PathBuf> {
     let mut checkpoints: Vec<_> = std::fs::read_dir(&checkpoint_dir)
         .ok()?
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "safetensors")
-        })
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "safetensors"))
         .collect();
 
     checkpoints.sort_by_key(|e| e.path());
@@ -122,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mcts_config = MctsConfig {
         num_simulations: args.mcts_sims as u32,
-        temperature: 0.0, // Argmax for stronger play
+        temperature: 0.0,          // Argmax for stronger play
         root_dirichlet_alpha: 0.0, // No exploration noise
         ..Default::default()
     };
@@ -137,7 +133,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = new_game(2, starting_player, &mut rng);
 
     println!("\n{BOLD}Welcome to Azul!{RESET}");
-    println!("You are Player {} ({})", human_player, if human_player == 0 { "first" } else { "second" });
+    println!(
+        "You are Player {} ({})",
+        human_player,
+        if human_player == 0 { "first" } else { "second" }
+    );
     println!("Type 'q' to quit at any time.\n");
 
     // Game loop

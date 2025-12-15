@@ -2,7 +2,9 @@
 //!
 //! Provides colorized, human-readable output for game boards, factories, and actions.
 
-use azul_engine::{Action, Color, DraftDestination, DraftSource, GameState, Token, BOARD_SIZE, WALL_PATTERN};
+use azul_engine::{
+    Action, Color, DraftDestination, DraftSource, GameState, Token, BOARD_SIZE, WALL_PATTERN,
+};
 
 // ANSI color codes for tile display
 pub const BLUE: &str = "\x1b[94m";
@@ -190,7 +192,11 @@ pub fn display_board(state: &GameState, highlight_player: Option<u8>) {
 /// Display a compact summary of the game state (for debugging)
 pub fn display_board_summary(state: &GameState) {
     println!("\n{BOLD}=== GAME STATE SUMMARY ==={RESET}");
-    println!("Round: {}, Current Player: {}", state.round + 1, state.current_player);
+    println!(
+        "Round: {}, Current Player: {}",
+        state.round + 1,
+        state.current_player
+    );
 
     println!("\n{BOLD}Factories:{RESET}");
     for f in 0..state.factories.num_factories as usize {
@@ -221,7 +227,13 @@ pub fn display_board_summary(state: &GameState) {
             let line = &player.pattern_lines[row];
             if line.count > 0 {
                 let color_str = line.color.map(|c| color_name(c)).unwrap_or("-");
-                println!("    Row {}: {}/{} {}", row + 1, line.count, row + 1, color_str);
+                println!(
+                    "    Row {}: {}/{} {}",
+                    row + 1,
+                    line.count,
+                    row + 1,
+                    color_str
+                );
             }
         }
         if player.floor.len > 0 {

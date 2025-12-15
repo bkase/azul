@@ -35,5 +35,9 @@ fn bench_feature_encode_all_players(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_feature_encode, bench_feature_encode_all_players);
+criterion_group!(
+    benches,
+    bench_feature_encode,
+    bench_feature_encode_all_players
+);
 criterion_main!(benches);

@@ -85,7 +85,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // If --no-train is set, override training_steps to 0
-    let training_steps = if args.no_train { 0 } else { args.training_steps };
+    let training_steps = if args.no_train {
+        0
+    } else {
+        args.training_steps
+    };
 
     // Determine start iteration from resume checkpoint
     let start_iter = if let Some(ref checkpoint_path) = args.resume {
@@ -123,7 +127,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     eprintln!("AlphaZero Training Configuration:");
-    eprintln!("  Iterations: {} (starting from {})", config.num_iters, config.start_iter);
+    eprintln!(
+        "  Iterations: {} (starting from {})",
+        config.num_iters, config.start_iter
+    );
     eprintln!("  Games per iteration: {}", config.self_play_games_per_iter);
     eprintln!(
         "  Training steps per iteration: {}",

@@ -2,9 +2,9 @@
 //!
 //! Defines the data structures for storing training examples during self-play.
 
+use crate::ActionId;
 use crate::Observation;
 use azul_engine::PlayerIdx;
-use crate::ActionId;
 
 /// One training example: (s, π, z) in AlphaZero notation.
 #[derive(Clone, Debug)]
