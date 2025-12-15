@@ -1956,4 +1956,126 @@ mod tests {
         let good_id = ActionEncoder::encode(&good_action);
         assert_eq!(result.action, good_id);
     }
+
+    /// Test C: MCTS avoids dominated floor moves.
+    ///
+    /// This test verifies that with immediate floor penalties applied in the engine,
+    /// MCTS will prefer a zero-overflow pattern line placement over dumping to floor.
+    /// Before the immediate penalty fix, MCTS couldn't distinguish these at depth 1.
+    #[test]
+    fn test_mcts_avoids_dominated_floor() {
+        use azul_engine::{Action, Color, DraftDestination, DraftSource, Token, WALL_DEST_COL};
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let mut state = azul_engine::new_game(2, 0, &mut rng);
+
+        // Ensure it's player 0's turn.
+        state.current_player = 0;
+
+        // Clear factories and center, then place exactly 1 tile in center (plus FP marker).
+        for f in 0..state.factories.num_factories as usize {
+            state.factories.factories[f].len = 0;
+        }
+        state.center.len = 2;
+        state.center.items[0] = Token::FirstPlayerMarker;
+        state.center.items[1] = Token::Tile(Color::Blue);
+
+        // Ensure pattern line row 0 (capacity 1) is empty and Blue not on wall row 0.
+        state.players[0].pattern_lines[0].color = None;
+        state.players[0].pattern_lines[0].count = 0;
+        let blue_col_row0 = WALL_DEST_COL[0][Color::Blue as usize] as usize;
+        state.players[0].wall[0][blue_col_row0] = None;
+
+        // Ensure floor is empty (starting fresh).
+        state.players[0].floor.len = 0;
+        state.players[0].score = 0;
+
+        // Define the two actions to compare.
+        let floor_action = Action {
+            source: DraftSource::Center,
+            color: Color::Blue,
+            dest: DraftDestination::Floor,
+        };
+        let pattern_line_action = Action {
+            source: DraftSource::Center,
+            color: Color::Blue,
+            dest: DraftDestination::PatternLine(0),
+        };
+
+        let legal = azul_engine::legal_actions(&state);
+        assert!(
+            legal.contains(&floor_action),
+            "floor_action should be legal"
+        );
+        assert!(
+            legal.contains(&pattern_line_action),
+            "pattern_line_action should be legal"
+        );
+
+        // Verify immediate reward difference:
+        // - Floor: tile + FP marker both to floor = slots 0,1 = penalties -1 -1 = -2
+        // - Pattern line: tile to pattern line row 0 (completes it), FP marker to floor = -1 penalty,
+        //   but since this is the last move of the round, end-of-round wall tiling happens,
+        //   placing the tile on wall (+1 for isolated tile), so net = -1 + 1 = 0.
+        fn score_delta(parent: &GameState, child: &GameState, player: u8) -> i16 {
+            child.players[player as usize].score - parent.players[player as usize].score
+        }
+
+        let mut r1 = rand::rngs::StdRng::seed_from_u64(1);
+        let floor_child = apply_action(state.clone(), floor_action, &mut r1).unwrap();
+        let floor_delta = score_delta(&state, &floor_child.state, 0);
+        // Floor: 1 Blue tile + FP marker = slots 0,1 = penalties -1 -1 = -2
+        assert_eq!(floor_delta, -2, "floor should have -2 penalty");
+
+        let mut r2 = rand::rngs::StdRng::seed_from_u64(2);
+        let pattern_child = apply_action(state.clone(), pattern_line_action, &mut r2).unwrap();
+        let pattern_delta = score_delta(&state, &pattern_child.state, 0);
+        // Pattern line completes row 0, wall tile scores +1, FP marker to floor slot 0 = -1
+        // Net: +1 - 1 = 0
+        assert_eq!(pattern_delta, 0, "pattern line should have 0 net (+1 wall, -1 FP marker)");
+
+        // Pattern line action is strictly better (less penalty).
+        assert!(
+            pattern_delta > floor_delta,
+            "pattern_line_action should have better score delta: {} vs {}",
+            pattern_delta,
+            floor_delta
+        );
+
+        // With a uniform prior/value network and no exploration noise,
+        // MCTS should choose the pattern line action due to the immediate reward signal.
+        let features = BasicFeatureExtractor::new(2);
+        let dummy_net = DummyNet::uniform(0.0);
+        let mcts_config = MctsConfig {
+            num_simulations: 200, // Enough to see the reward signal clearly
+            temperature: 0.0,
+            root_dirichlet_alpha: 0.0,
+            ..MctsConfig::default()
+        };
+        let mut agent = AlphaZeroMctsAgent::new(mcts_config, features.clone(), dummy_net);
+
+        let obs = features.encode(&state, state.current_player);
+        let mut legal_mask = vec![false; ACTION_SPACE_SIZE];
+        for a in &legal {
+            let id = ActionEncoder::encode(a);
+            legal_mask[id as usize] = true;
+        }
+
+        let input = AgentInput {
+            observation: &obs,
+            legal_action_mask: &legal_mask,
+            current_player: state.current_player,
+            state: Some(&state),
+        };
+
+        let mut mcts_rng = rand::rngs::StdRng::seed_from_u64(42);
+        let result = agent.select_action_and_policy(&input, 0.0, &mut mcts_rng);
+
+        let pattern_line_id = ActionEncoder::encode(&pattern_line_action);
+        assert_eq!(
+            result.action, pattern_line_id,
+            "MCTS should choose pattern line (id {}) over floor; got action id {}",
+            pattern_line_id, result.action
+        );
+    }
 }
