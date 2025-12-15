@@ -17,7 +17,7 @@ use mlx_rs::transforms::eval_params;
 use mlx_rs::Array;
 use rand::{Rng, RngCore, SeedableRng};
 use rayon::prelude::*;
-use azul_engine::{DraftDestination, Phase, BOARD_SIZE};
+use azul_engine::{DraftDestination, DraftSource, GameState, Phase, Token, BOARD_SIZE};
 
 use super::{PendingMove, ReplayBuffer, TrainingExample};
 use crate::{
@@ -46,6 +46,14 @@ pub struct SelfPlayResult {
     /// Number of moves that went to floor when a non-floor option existed.
     /// This distinguishes "forced floor" (no alternative) from "chosen floor" (policy collapsed).
     pub optional_floor_moves: usize,
+
+    /// Floor chosen when a non-floor action exists with zero overflow.
+    /// This is "strictly dominated" - a clear mistake. Should go to ~0 in sane learning.
+    pub dominated_floor_moves: usize,
+
+    /// Floor chosen when ALL non-floor actions would cause overflow (min_overflow > 0).
+    /// This can be rational damage control (e.g., choosing where overflow goes).
+    pub overflow_floor_moves: usize,
 
     /// Number of wall tiles placed during the game (across all players).
     pub wall_tiles_placed: usize,
@@ -324,6 +332,59 @@ fn compute_floor_policy_mass(policy: &[f32], legal_mask: &[bool]) -> f32 {
     floor_mass
 }
 
+/// Count how many tiles of a given color are available from a source.
+fn count_tiles_from_source(state: &GameState, source: DraftSource, color: azul_engine::Color) -> usize {
+    match source {
+        DraftSource::Factory(f_idx) => {
+            let factory = &state.factories.factories[f_idx as usize];
+            factory.tiles[..factory.len as usize]
+                .iter()
+                .filter(|&&c| c == color)
+                .count()
+        }
+        DraftSource::Center => {
+            state.center.items[..state.center.len as usize]
+                .iter()
+                .filter(|t| matches!(t, Token::Tile(c) if *c == color))
+                .count()
+        }
+    }
+}
+
+/// Compute how many tiles would overflow to floor for a given non-floor action.
+/// Returns 0 if the action is Floor (by definition no overflow from placing on floor).
+fn compute_overflow_for_action(state: &GameState, action: &azul_engine::Action, player: usize) -> usize {
+    let tiles_to_take = count_tiles_from_source(state, action.source, action.color);
+
+    match action.dest {
+        DraftDestination::Floor => 0, // By definition, floor action has no "overflow"
+        DraftDestination::PatternLine(row) => {
+            let capacity = (row as usize) + 1;
+            let current = state.players[player].pattern_lines[row as usize].count as usize;
+            let remaining = capacity.saturating_sub(current);
+            tiles_to_take.saturating_sub(remaining)
+        }
+    }
+}
+
+/// Compute the minimum overflow among all legal non-floor actions.
+/// Returns None if there are no legal non-floor actions.
+fn compute_min_overflow(state: &GameState, player: usize, legal_mask: &[bool]) -> Option<usize> {
+    let mut min_overflow: Option<usize> = None;
+
+    for (action_id, &is_legal) in legal_mask.iter().enumerate() {
+        if is_legal {
+            let action = ActionEncoder::decode(action_id as u16);
+            if !matches!(action.dest, DraftDestination::Floor) {
+                let overflow = compute_overflow_for_action(state, &action, player);
+                min_overflow = Some(min_overflow.map_or(overflow, |m| m.min(overflow)));
+            }
+        }
+    }
+
+    min_overflow
+}
+
 /// Run a single self-play game and return training examples with diagnostic stats.
 ///
 /// Uses the MCTS agent to play against itself, recording (observation, policy, value)
@@ -352,6 +413,8 @@ where
     // Track floor moves with their context for optional_floor detection
     let mut floor_move_indices: Vec<usize> = Vec::new();
     let mut had_non_floor_alternative: Vec<bool> = Vec::new();
+    // Track min_overflow for each floor move (None if no non-floor alternatives)
+    let mut floor_move_min_overflow: Vec<Option<usize>> = Vec::new();
 
     // Track floor policy mass (sum of pi[a] for floor actions in each move's policy)
     let mut total_floor_policy_mass = 0.0f32;
@@ -364,6 +427,11 @@ where
 
         // Check if non-floor alternatives exist BEFORE making the move
         let non_floor_exists = has_non_floor_legal_action(&step.legal_action_mask);
+
+        // Compute min_overflow among non-floor actions (if state available)
+        let min_overflow = step.state.as_ref().and_then(|state| {
+            compute_min_overflow(state, p, &step.legal_action_mask)
+        });
 
         // Build AgentInput (with full state if available)
         let input = AgentInput {
@@ -396,6 +464,7 @@ where
         if is_floor_move {
             floor_move_indices.push(moves.len());
             had_non_floor_alternative.push(non_floor_exists);
+            floor_move_min_overflow.push(min_overflow);
         }
 
         // Step env
@@ -445,9 +514,25 @@ where
     let wall_tiles_end = count_wall_tiles(&env.game_state);
     let wall_tiles_placed = wall_tiles_end.saturating_sub(wall_tiles_start);
 
-    // Count floor moves and optional floor moves
+    // Count floor moves and categorize them
     let floor_moves = floor_move_indices.len();
     let optional_floor_moves = had_non_floor_alternative.iter().filter(|&&x| x).count();
+
+    // Categorize optional floor moves:
+    // - dominated_floor: floor chosen when min_overflow == 0 (strictly dominated, a mistake)
+    // - overflow_floor: floor chosen when min_overflow > 0 (potentially rational damage control)
+    let mut dominated_floor_moves = 0usize;
+    let mut overflow_floor_moves = 0usize;
+    for (i, &had_alt) in had_non_floor_alternative.iter().enumerate() {
+        if had_alt {
+            // This was an optional floor move
+            match floor_move_min_overflow.get(i) {
+                Some(Some(0)) => dominated_floor_moves += 1, // Zero-overflow option existed
+                Some(Some(_)) => overflow_floor_moves += 1,  // All options had overflow
+                Some(None) | None => {} // No state available or no non-floor alternatives
+            }
+        }
+    }
 
     // 4. Compute discounted returns for each pending move (terminal value = 0).
     //
@@ -498,6 +583,8 @@ where
         examples,
         floor_moves,
         optional_floor_moves,
+        dominated_floor_moves,
+        overflow_floor_moves,
         wall_tiles_placed,
         was_truncated,
         final_scores,
@@ -603,7 +690,9 @@ where
             let mut sp_games = 0usize;
             let mut sp_moves = 0usize;
             let mut sp_floor_moves = 0usize;
-            let mut sp_optional_floor_moves = 0usize;
+            let mut _sp_optional_floor_moves = 0usize; // Kept for backward compat, replaced by dom/ovf
+            let mut sp_dominated_floor_moves = 0usize;
+            let mut sp_overflow_floor_moves = 0usize;
             let mut sp_wall_tiles_placed = 0usize;
             let mut sp_truncated_games = 0usize;
             let mut sp_ties = 0usize;
@@ -618,7 +707,9 @@ where
                 sp_games += 1;
                 sp_moves += result.examples.len();
                 sp_floor_moves += result.floor_moves;
-                sp_optional_floor_moves += result.optional_floor_moves;
+                _sp_optional_floor_moves += result.optional_floor_moves;
+                sp_dominated_floor_moves += result.dominated_floor_moves;
+                sp_overflow_floor_moves += result.overflow_floor_moves;
                 sp_wall_tiles_placed += result.wall_tiles_placed;
                 sp_total_floor_policy_mass += result.total_floor_policy_mass;
                 sp_total_moves_for_floor_mass += result.num_moves_for_floor_mass;
@@ -722,9 +813,17 @@ where
                 } else {
                     0.0
                 };
-                // Optional floor: floor moves where a non-floor alternative existed
-                let opt_floor_pct = if sp_floor_moves > 0 {
-                    100.0 * (sp_optional_floor_moves as f32) / (sp_floor_moves as f32)
+                // Dominated floor: floor chosen when zero-overflow option existed (a clear mistake)
+                // Should go to ~0% in sane learning.
+                let dom_floor_pct = if sp_moves > 0 {
+                    100.0 * (sp_dominated_floor_moves as f32) / (sp_moves as f32)
+                } else {
+                    0.0
+                };
+                // Overflow floor: floor chosen when all non-floor options would overflow
+                // This can be rational damage control - not necessarily a mistake.
+                let ovf_floor_pct = if sp_moves > 0 {
+                    100.0 * (sp_overflow_floor_moves as f32) / (sp_moves as f32)
                 } else {
                     0.0
                 };
@@ -752,14 +851,15 @@ where
                 };
 
                 eprintln!(
-                    "Iter {}/{} | replay: {} | loss: {:.4} | sp: moves/g={:.1} floor={:.1}% opt_floor={:.1}% pi_floor={:.1}% wall={:.1} |z|={:.3} trunc={:.1}%{}",
+                    "Iter {}/{} | replay: {} | loss: {:.4} | sp: moves/g={:.1} floor={:.1}% dom={:.1}% ovf={:.1}% pi_floor={:.1}% wall={:.1} |z|={:.3} trunc={:.1}%{}",
                     iter,
                     self.cfg.num_iters,
                     self.replay.len(),
                     avg_loss,
                     moves_per_game,
                     floor_pct,
-                    opt_floor_pct,
+                    dom_floor_pct,
+                    ovf_floor_pct,
                     mean_floor_policy_mass,
                     wall_tiles_per_game,
                     abs_z,
