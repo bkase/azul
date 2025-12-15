@@ -98,6 +98,7 @@ dependencies = [
  "azul-engine",
  "criterion",
  "mlx-rs",
+ "mlx-sys",
  "rand",
  "rand_distr",
  "rayon",

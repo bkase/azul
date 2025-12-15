@@ -114,6 +114,9 @@ where
             }
 
             let mut backlog: VecDeque<WorkerMsg<N>> = VecDeque::new();
+            let mut batch_count = 0u64;
+            // Clear MLX cache periodically to prevent Metal resource exhaustion.
+            const CACHE_CLEAR_INTERVAL: u64 = 100;
             loop {
                 let first = match backlog.pop_front() {
                     Some(msg) => msg,
@@ -383,6 +386,14 @@ where
                             let queue_elapsed = queue_start.elapsed().as_nanos() as u64;
                             PROF.time_nn_worker_queue_ns
                                 .fetch_add(queue_elapsed, Ordering::Relaxed);
+                        }
+
+                        // Periodically clear MLX cache to prevent Metal resource exhaustion
+                        batch_count += 1;
+                        if batch_count % CACHE_CLEAR_INTERVAL == 0 {
+                            unsafe {
+                                mlx_sys::mlx_clear_cache();
+                            }
                         }
                     }
                     WorkerMsg::UpdateNet(new_net) => {

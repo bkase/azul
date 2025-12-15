@@ -885,6 +885,15 @@ where
                 let elapsed = iter_wall.elapsed().as_nanos() as u64;
                 PROF.time_iter_wall_ns.fetch_add(elapsed, Ordering::Relaxed);
             }
+
+            // Periodically clear MLX cache to prevent Metal resource exhaustion.
+            // MLX accumulates computation graphs and command buffers that can exhaust
+            // Metal's resource limits (~500k) over many iterations.
+            if iter % 10 == 0 {
+                unsafe {
+                    mlx_sys::mlx_clear_cache();
+                }
+            }
         }
 
         // Print profiling summary at the end
