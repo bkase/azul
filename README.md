@@ -139,10 +139,11 @@ AlphaZero training components:
 
 ## Performance
 
-On Apple Silicon (M-series):
-- ~1.76 games/second (self-play)
-- ~2,310 MCTS simulations/second
-- ~7μs per batched neural network evaluation
+On Apple Silicon (M-series, 600 MCTS sims/move):
+- ~10 games/second (self-play)
+- ~26,000 MCTS simulations/second
+- ~34μs per batched neural network evaluation
+- ~140 positions per NN batch
 
 ## How AlphaZero Works
 
