@@ -85,12 +85,11 @@ impl ReplayBuffer {
 mod tests {
     use super::*;
     use crate::ACTION_SPACE_SIZE;
-    use mlx_rs::Array;
     use rand::SeedableRng;
 
     fn make_example(value: f32) -> TrainingExample {
         TrainingExample {
-            observation: Array::zeros::<f32>(&[10]).unwrap(),
+            observation: vec![0.0f32; 10],
             policy: vec![0.0; ACTION_SPACE_SIZE],
             action: 0,
             value,

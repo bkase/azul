@@ -235,7 +235,7 @@ pub fn build_training_batch(examples: &[&TrainingExample]) -> (Array, Array, Arr
         panic!("Cannot build batch from empty examples");
     }
 
-    let obs_size = examples[0].observation.shape()[0] as usize;
+    let obs_size = examples[0].observation.len();
 
     // Collect data into contiguous vectors
     let mut obs_data = Vec::with_capacity(batch_size * obs_size);
@@ -244,8 +244,8 @@ pub fn build_training_batch(examples: &[&TrainingExample]) -> (Array, Array, Arr
 
     for ex in examples {
         // observation
-        let obs_slice = ex.observation.as_slice::<f32>();
-        obs_data.extend_from_slice(obs_slice);
+        debug_assert_eq!(ex.observation.len(), obs_size);
+        obs_data.extend_from_slice(&ex.observation);
 
         // policy
         debug_assert_eq!(ex.policy.len(), ACTION_SPACE_SIZE);
@@ -407,6 +407,8 @@ where
     F: FeatureExtractor,
     A: MctsAgentExt,
 {
+    crate::configure_mlx_for_current_thread();
+
     // 1. Reset env
     let mut step = env.reset(rng);
     let mut moves: Vec<PendingMove> = Vec::new();
@@ -578,8 +580,9 @@ where
             m.observation
                 .eval()
                 .expect("Failed to evaluate observation");
+            let obs_vec = m.observation.as_slice::<f32>().to_vec();
             TrainingExample {
-                observation: m.observation,
+                observation: obs_vec,
                 policy: m.policy,
                 action: m.action,
                 value,
@@ -659,6 +662,8 @@ where
 
     /// Run the main training loop.
     pub fn run(&mut self) -> Result<(), TrainingError> {
+        crate::configure_mlx_for_current_thread();
+
         for iter in self.cfg.start_iter..self.cfg.num_iters {
             #[cfg(feature = "profiling")]
             let iter_wall = std::time::Instant::now();
@@ -1079,7 +1084,7 @@ mod tests {
 
         let examples: Vec<TrainingExample> = (0..batch_size)
             .map(|i| TrainingExample {
-                observation: Array::zeros::<f32>(&[obs_size]).unwrap(),
+                observation: vec![0.0f32; obs_size],
                 policy: vec![1.0 / ACTION_SPACE_SIZE as f32; ACTION_SPACE_SIZE],
                 action: 0,
                 value: i as f32 * 0.1,
@@ -1091,7 +1096,7 @@ mod tests {
 
         assert_eq!(
             obs.shape(),
-            &[batch_size as i32, obs_size],
+            &[batch_size as i32, obs_size as i32],
             "Observations should have shape [B, obs_size]"
         );
         assert_eq!(
@@ -1478,7 +1483,7 @@ mod tests {
                 let mut policy = vec![0.0f32; ACTION_SPACE_SIZE];
                 policy[i % ACTION_SPACE_SIZE] = 1.0; // One-hot
                 TrainingExample {
-                    observation: Array::zeros::<f32>(&[obs_size]).unwrap(),
+                    observation: vec![0.0f32; obs_size],
                     policy,
                     action: (i % ACTION_SPACE_SIZE) as u16,
                     value: if i == 0 { 0.5 } else { -0.5 },

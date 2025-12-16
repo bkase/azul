@@ -3,14 +3,15 @@
 //! Defines the data structures for storing training examples during self-play.
 
 use crate::ActionId;
-use crate::Observation;
 use azul_engine::PlayerIdx;
 
 /// One training example: (s, π, z) in AlphaZero notation.
 #[derive(Clone, Debug)]
 pub struct TrainingExample {
     /// Observation from the acting player's perspective.
-    pub observation: Observation, // shape [obs_size]
+    ///
+    /// Stored on CPU to avoid keeping long-lived MLX/Metal buffers alive in the replay buffer.
+    pub observation: Vec<f32>, // len == obs_size
 
     /// MCTS-improved policy π over ACTION_SPACE_SIZE actions.
     /// Stored as a flat f32 vec; converted to Array at batch time.
@@ -33,7 +34,7 @@ pub struct PendingMove {
     pub player: PlayerIdx,
 
     /// Observation at the time of the move
-    pub observation: Observation,
+    pub observation: crate::Observation,
 
     /// MCTS policy distribution (from visit counts)
     pub policy: Vec<f32>, // len == ACTION_SPACE_SIZE

@@ -24,3 +24,8 @@ train = "run --bin azul --features profiling --target-dir target-profiling --rel
 # cargo run-prof --bin play - Run play binary with profiling
 # cargo train               - Run training with profiling
 # cargo build-fast          - Build without profiling (for development)
+
+[env]
+# MLX/Metal is not reliably thread-safe across Rust's parallel test runner.
+# Running tests single-threaded avoids intermittent/abort-level GPU failures.
+RUST_TEST_THREADS = "1"

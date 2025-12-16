@@ -96,6 +96,8 @@ where
         const INFER_CHAN_CAP: usize = 1024;
         let (tx, rx) = mpsc::sync_channel::<WorkerMsg<N>>(INFER_CHAN_CAP);
         thread::spawn(move || {
+            crate::configure_mlx_for_current_thread();
+
             // Drain-loop batching:
             // - Block for first request
             // - Drain as many queued requests as possible (up to max_batch)
@@ -331,18 +333,24 @@ where
                         }
 
                         let total_batch = total_req_batch;
+                        // Reduce shape churn by rounding up to a small set of batch sizes.
+                        // MLX/Metal caching can accumulate resources keyed on tensor shapes.
+                        let padded_batch = total_batch.next_power_of_two().min(max_batch);
                         #[cfg(feature = "profiling")]
                         let (total_positions, total_evals) =
                             reqs.iter().fold((0usize, 0usize), |(p, e), r| {
                                 (p + r.positions, e + r.eval_count)
                             });
-                        let mut obs_concat = Vec::with_capacity(total_batch * obs_size);
+                        let mut obs_concat = Vec::with_capacity(padded_batch * obs_size);
                         for r in reqs.iter() {
                             obs_concat.extend_from_slice(&r.obs);
                         }
+                        if padded_batch > total_batch {
+                            obs_concat.resize(padded_batch * obs_size, 0.0);
+                        }
 
                         let obs_batch =
-                            Array::from_slice(&obs_concat, &[total_batch as i32, obs_size as i32]);
+                            Array::from_slice(&obs_concat, &[padded_batch as i32, obs_size as i32]);
                         #[cfg(feature = "profiling")]
                         let worker_start = std::time::Instant::now();
                         let (policy, values) = net.predict_batch(&obs_batch);
@@ -870,6 +878,8 @@ where
         root_state: &GameState,
         rng: &mut impl Rng,
     ) -> [f32; ACTION_SPACE_SIZE] {
+        crate::configure_mlx_for_current_thread();
+
         #[cfg(feature = "profiling")]
         let _t = Timer::new(&PROF.time_mcts_search_ns);
         #[cfg(feature = "profiling")]
@@ -1331,8 +1341,6 @@ where
             learning_rate,
             grads,
         );
-        // Keep inference worker in sync after updates.
-        self.inference.update_net(self.net.clone());
     }
 
     fn eval_parameters(&self) {
@@ -2088,5 +2096,144 @@ mod tests {
             "MCTS should choose pattern line (id {}) over floor; got action id {}",
             pattern_line_id, result.action
         );
+    }
+
+    #[test]
+    #[ignore]
+    #[should_panic(expected = "Resource limit")]
+    fn repro_mlx_metal_resource_limit_fast() {
+        use rand::{Rng, SeedableRng};
+
+        // IMPORTANT: run this test single-threaded:
+        // RUST_TEST_THREADS=1 cargo test -p azul-rl-env repro_mlx_metal_resource_limit_fast -- --ignored --nocapture
+
+        // Use a real model for fidelity.
+        let features = crate::BasicFeatureExtractor::new(2);
+        let obs_size = features.obs_size();
+
+        // Keep the net small-ish so the loop runs fast, but still uses real MLX ops.
+        // If the repro is too slow, reduce hidden_size. If it doesn't repro, increase it.
+        let hidden_size = 64;
+        let mut net = crate::AlphaZeroNet::new(obs_size, hidden_size);
+
+        // --- Option A: bypass the worker and hammer eval directly.
+        let max_batch: usize = 512;
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let mut obs = vec![0.0f32; max_batch * obs_size];
+        for x in obs.iter_mut() {
+            *x = rng.random::<f32>();
+        }
+
+        // Loop count: tune this down/up on your machine.
+        // You want it to fail in seconds/minutes, not hours.
+        let iters: usize = std::env::var("MLX_STRESS_ITERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(200_000);
+
+        for i in 0..iters {
+            // Mix batch sizes to mimic real coalescing (and produce shape variety).
+            // Shape variety is often what explodes caches.
+            let b = match i & 7 {
+                0 => 1,
+                1 => 8,
+                2 => 16,
+                3 => 32,
+                4 => 64,
+                5 => 128,
+                6 => 256,
+                _ => 512,
+            };
+
+            let obs_slice = &obs[..(b * obs_size)];
+            let obs_batch =
+                mlx_rs::Array::from_slice(obs_slice, &[b as i32, obs_size as i32]);
+
+            let (policy, values) = net.predict_batch(&obs_batch);
+
+            // This is the exact operation that panics in the worker when Metal hits the limit.
+            mlx_rs::transforms::eval([&policy, &values]).unwrap();
+
+            // Force materialization / host touch.
+            let _ = policy.as_slice::<f32>();
+            let _ = values.as_slice::<f32>();
+
+            if i % 10_000 == 0 {
+                eprintln!("stress iters = {i}/{iters}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn stress_inference_worker_mlx_metal_fast() {
+        use rand::{Rng, SeedableRng};
+        use std::sync::Arc;
+
+        // Run single-threaded test harness, but we spawn our own threads here to feed the worker.
+        // RUST_TEST_THREADS=1 cargo test -p azul-rl-env stress_inference_worker_mlx_metal_fast -- --ignored --nocapture
+
+        let features = crate::BasicFeatureExtractor::new(2);
+        let obs_size = features.obs_size();
+        let net = crate::AlphaZeroNet::new(obs_size, 64);
+        let worker = Arc::new(InferenceWorker::new(net));
+
+        let max_batch: usize = std::env::var("MLX_WORKER_MAX_BATCH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(256);
+        let threads: usize = std::env::var("MLX_WORKER_STRESS_THREADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8);
+        let iters_per_thread: usize = std::env::var("MLX_WORKER_STRESS_ITERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(50_000);
+
+        std::thread::scope(|scope| {
+            for t in 0..threads {
+                let worker = Arc::clone(&worker);
+                scope.spawn(move || {
+                    let mut rng = rand::rngs::StdRng::seed_from_u64(t as u64);
+                    let mut obs = vec![0.0f32; max_batch * obs_size];
+                    for x in obs.iter_mut() {
+                        *x = rng.random::<f32>();
+                    }
+
+                    for i in 0..iters_per_thread {
+                        // Simulate shape variability across requests.
+                        let b = match (t + i) & 7 {
+                            0 => 1,
+                            1 => 4,
+                            2 => 8,
+                            3 => 16,
+                            4 => 32,
+                            5 => 24,
+                            6 => 12,
+                            _ => 32,
+                        };
+
+                        let obs_slice = &obs[..(b * obs_size)];
+                        let (logits, values) = worker.infer(
+                            obs_slice.to_vec(),
+                            b,
+                            obs_size,
+                            max_batch,
+                            1,
+                            b,
+                        );
+
+                        // Touch outputs to force any lazy sync/copies.
+                        let _ = (logits, values);
+
+                        if i % 10_000 == 0 && t == 0 {
+                            eprintln!("worker stress iters = {i}/{iters_per_thread}");
+                        }
+                    }
+                });
+            }
+        });
     }
 }
