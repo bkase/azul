@@ -3,6 +3,7 @@
 //! Implements a simple fully-connected architecture using mlx_rs::nn primitives.
 
 use mlx_rs::macros::ModuleParameters;
+use mlx_rs::module::Param;
 use mlx_rs::module::{Module, ModuleParameters};
 use mlx_rs::nn::{Linear, Relu, Sequential, Tanh};
 use mlx_rs::transforms::eval_params;
@@ -38,22 +39,65 @@ unsafe impl Send for AlphaZeroNet {}
 
 impl Clone for AlphaZeroNet {
     fn clone(&self) -> Self {
-        // Create a new network with the same architecture
-        let mut new_net = Self::new(self.obs_size, self.hidden_size);
+        // Avoid `Linear::new(...)` (random initialization) during cloning.
+        // Cloning happens frequently (e.g. per self-play game + inference backend refresh),
+        // and random init can be surprisingly expensive and occasionally fail under MLX/Metal
+        // resource pressure. Instead, rebuild the module structure directly from the existing
+        // parameter arrays (copy-on-write clones).
+        let src = ModuleParameters::parameters(self).flatten();
 
-        // Copy parameters from self to new_net
-        let src_params = ModuleParameters::parameters(self).flatten();
-        let mut dst_params = ModuleParameters::parameters_mut(&mut new_net).flatten();
+        let get = |key: &str| -> Array {
+            let arr = src
+                .get(key)
+                .unwrap_or_else(|| panic!("AlphaZeroNet::clone missing parameter {key:?}"));
+            <Array as Clone>::clone(*arr)
+        };
 
-        // Copy each parameter array
-        for (key, src_arr) in src_params {
-            if let Some(dst_arr) = dst_params.get_mut(&key) {
-                // MLX arrays use copy-on-write, so this is efficient
-                **dst_arr = src_arr.clone();
-            }
+        let get_opt =
+            |key: &str| -> Option<Array> { src.get(key).map(|arr| <Array as Clone>::clone(*arr)) };
+
+        let trunk = Sequential::new()
+            .append(Linear {
+                weight: Param::new(get("trunk.layers.0.weight")),
+                bias: Param::new(get_opt("trunk.layers.0.bias")),
+            })
+            .append(Relu)
+            .append(Linear {
+                weight: Param::new(get("trunk.layers.2.weight")),
+                bias: Param::new(get_opt("trunk.layers.2.bias")),
+            })
+            .append(Relu);
+
+        let policy_head = Sequential::new()
+            .append(Linear {
+                weight: Param::new(get("policy_head.layers.0.weight")),
+                bias: Param::new(get_opt("policy_head.layers.0.bias")),
+            })
+            .append(Relu)
+            .append(Linear {
+                weight: Param::new(get("policy_head.layers.2.weight")),
+                bias: Param::new(get_opt("policy_head.layers.2.bias")),
+            });
+
+        let value_head = Sequential::new()
+            .append(Linear {
+                weight: Param::new(get("value_head.layers.0.weight")),
+                bias: Param::new(get_opt("value_head.layers.0.bias")),
+            })
+            .append(Relu)
+            .append(Linear {
+                weight: Param::new(get("value_head.layers.2.weight")),
+                bias: Param::new(get_opt("value_head.layers.2.bias")),
+            })
+            .append(Tanh);
+
+        Self {
+            obs_size: self.obs_size,
+            hidden_size: self.hidden_size,
+            trunk,
+            policy_head,
+            value_head,
         }
-
-        new_net
     }
 }
 
