@@ -53,14 +53,14 @@ pub fn display_tile(color: Color) -> String {
 pub fn display_token(token: Token) -> String {
     match token {
         Token::Tile(c) => display_tile(c),
-        Token::FirstPlayerMarker => format!("{}1{}", BOLD, RESET),
+        Token::FirstPlayerMarker => format!("{BOLD}1{RESET}"),
     }
 }
 
 /// Format an action for display
 pub fn format_action(action: &Action) -> String {
     let source = match action.source {
-        DraftSource::Factory(f) => format!("F{}", f),
+        DraftSource::Factory(f) => format!("F{f}"),
         DraftSource::Center => "Center".to_string(),
     };
     let color = format!(
@@ -73,13 +73,13 @@ pub fn format_action(action: &Action) -> String {
         DraftDestination::PatternLine(r) => format!("Line {}", r + 1),
         DraftDestination::Floor => "Floor".to_string(),
     };
-    format!("{} {} -> {}", source, color, dest)
+    format!("{source} {color} -> {dest}")
 }
 
 /// Format an action in compact form (for tables)
 pub fn format_action_compact(action: &Action) -> String {
     let source = match action.source {
-        DraftSource::Factory(f) => format!("F{}", f),
+        DraftSource::Factory(f) => format!("F{f}"),
         DraftSource::Center => "C".to_string(),
     };
     let dest = match action.dest {
@@ -105,7 +105,7 @@ pub fn display_board(state: &GameState, highlight_player: Option<u8>) {
     println!("{BOLD}FACTORIES:{RESET}");
     for f in 0..state.factories.num_factories as usize {
         let factory = &state.factories.factories[f];
-        print!("  F{}: ", f);
+        print!("  F{f}: ");
         if factory.len == 0 {
             print!("{DIM}(empty){RESET}");
         } else {
@@ -136,12 +136,16 @@ pub fn display_board(state: &GameState, highlight_player: Option<u8>) {
         } else {
             format!("{DIM}PLAYER {} (Score: {}){RESET}", p, player.score)
         };
-        println!("{}", header);
+        println!("{header}");
         println!("  Pattern Lines          Wall");
 
-        for row in 0..BOARD_SIZE {
+        for (row, (line, (wall_row, pattern_row))) in player
+            .pattern_lines
+            .iter()
+            .zip(player.wall.iter().zip(WALL_PATTERN.iter()))
+            .enumerate()
+        {
             // Pattern line (right-aligned)
-            let line = &player.pattern_lines[row];
             let cap = row + 1;
             let empty = cap - line.count as usize;
 
@@ -164,12 +168,11 @@ pub fn display_board(state: &GameState, highlight_player: Option<u8>) {
             print!(" -> ");
 
             // Wall
-            for col in 0..BOARD_SIZE {
-                if let Some(color) = player.wall[row][col] {
-                    print!("{} ", display_tile(color));
+            for (cell, &expected) in wall_row.iter().zip(pattern_row.iter()) {
+                if let Some(color) = cell {
+                    print!("{} ", display_tile(*color));
                 } else {
                     // Show expected color dimmed
-                    let expected = WALL_PATTERN[row][col];
                     print!("{}{}{} ", DIM, color_char(expected), RESET);
                 }
             }
@@ -202,7 +205,7 @@ pub fn display_board_summary(state: &GameState) {
     for f in 0..state.factories.num_factories as usize {
         let factory = &state.factories.factories[f];
         if factory.len > 0 {
-            print!("  F{}: ", f);
+            print!("  F{f}: ");
             for i in 0..factory.len as usize {
                 print!("{} ", display_tile(factory.tiles[i]));
             }
@@ -226,7 +229,7 @@ pub fn display_board_summary(state: &GameState) {
         for row in 0..BOARD_SIZE {
             let line = &player.pattern_lines[row];
             if line.count > 0 {
-                let color_str = line.color.map(|c| color_name(c)).unwrap_or("-");
+                let color_str = line.color.map(color_name).unwrap_or("-");
                 println!(
                     "    Row {}: {}/{} {}",
                     row + 1,

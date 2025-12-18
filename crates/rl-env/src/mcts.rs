@@ -826,8 +826,7 @@ where
                     .nn_batch_size
                     .max(b)
                     .saturating_mul(8)
-                    .max(1)
-                    .min(512);
+                    .clamp(1, 512);
                 self.inference.infer(
                     obs_scratch.clone(),
                     b,
@@ -906,8 +905,7 @@ where
                     .nn_batch_size
                     .max(1)
                     .saturating_mul(8)
-                    .max(1)
-                    .min(512);
+                    .clamp(1, 512);
                 self.inference.infer(obs_data, 1, obs_size, max_batch, 1, 1)
             };
 
@@ -1601,8 +1599,7 @@ mod tests {
             let action_id = agent.select_action(&input, &mut rng);
             assert!(
                 step.legal_action_mask[action_id as usize],
-                "MCTS should never select illegal action {}",
-                action_id
+                "MCTS should never select illegal action {action_id}"
             );
         }
     }
@@ -1783,8 +1780,7 @@ mod tests {
         let policy_sum: f32 = result.policy.iter().sum();
         assert!(
             (policy_sum - 1.0).abs() < 0.01,
-            "Policy should sum to 1, got {}",
-            policy_sum
+            "Policy should sum to 1, got {policy_sum}"
         );
 
         // Action is legal
@@ -2069,14 +2065,15 @@ mod tests {
         let pattern_delta = score_delta(&state, &pattern_child.state, 0);
         // Pattern line completes row 0, wall tile scores +1, FP marker to floor slot 0 = -1
         // Net: +1 - 1 = 0
-        assert_eq!(pattern_delta, 0, "pattern line should have 0 net (+1 wall, -1 FP marker)");
+        assert_eq!(
+            pattern_delta, 0,
+            "pattern line should have 0 net (+1 wall, -1 FP marker)"
+        );
 
         // Pattern line action is strictly better (less penalty).
         assert!(
             pattern_delta > floor_delta,
-            "pattern_line_action should have better score delta: {} vs {}",
-            pattern_delta,
-            floor_delta
+            "pattern_line_action should have better score delta: {pattern_delta} vs {floor_delta}"
         );
 
         // With a uniform prior/value network and no exploration noise,
@@ -2256,8 +2253,7 @@ mod tests {
             };
 
             let obs_slice = &obs[..(b * obs_size)];
-            let obs_batch =
-                mlx_rs::Array::from_slice(obs_slice, &[b as i32, obs_size as i32]);
+            let obs_batch = mlx_rs::Array::from_slice(obs_slice, &[b as i32, obs_size as i32]);
 
             let (policy, values) = net.predict_batch(&obs_batch);
 
@@ -2325,14 +2321,8 @@ mod tests {
                         };
 
                         let obs_slice = &obs[..(b * obs_size)];
-                        let (logits, values) = worker.infer(
-                            obs_slice.to_vec(),
-                            b,
-                            obs_size,
-                            max_batch,
-                            1,
-                            b,
-                        );
+                        let (logits, values) =
+                            worker.infer(obs_slice.to_vec(), b, obs_size, max_batch, 1, b);
 
                         // Touch outputs to force any lazy sync/copies.
                         let _ = (logits, values);

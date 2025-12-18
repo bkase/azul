@@ -14,6 +14,7 @@ use mlx_rs::Array;
 
 /// Dummy network that returns uniform policy and zero value.
 /// Removes NN cost to isolate MCTS overhead.
+#[derive(Clone)]
 struct DummyNet;
 
 impl PolicyValueNet for DummyNet {

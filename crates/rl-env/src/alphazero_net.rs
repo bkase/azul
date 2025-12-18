@@ -250,9 +250,8 @@ mod tests {
 
         // Check value is in valid range (Tanh output)
         assert!(
-            value >= -1.0 && value <= 1.0,
-            "Value {} should be in [-1, 1]",
-            value
+            (-1.0..=1.0).contains(&value),
+            "Value {value} should be in [-1, 1]"
         );
     }
 
@@ -286,7 +285,7 @@ mod tests {
         // Check values are in valid range
         let values_slice = values.as_slice::<f32>();
         for &v in values_slice {
-            assert!(v >= -1.0 && v <= 1.0, "Value {} should be in [-1, 1]", v);
+            assert!((-1.0..=1.0).contains(&v), "Value {v} should be in [-1, 1]");
         }
     }
 
@@ -455,17 +454,12 @@ mod tests {
         {
             assert!(
                 (before - after).abs() < 1e-5,
-                "Policy logit {} differs: before={}, after={}",
-                i,
-                before,
-                after
+                "Policy logit {i} differs: before={before}, after={after}"
             );
         }
         assert!(
             (value_before - value_after).abs() < 1e-5,
-            "Value differs: before={}, after={}",
-            value_before,
-            value_after
+            "Value differs: before={value_before}, after={value_after}"
         );
 
         // Clean up

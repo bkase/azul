@@ -8,11 +8,11 @@ use std::path::PathBuf;
 use clap::Parser;
 use rand::SeedableRng;
 
-use azul_engine::{new_game, Color, Token, ALL_COLORS, BOARD_SIZE, WALL_DEST_COL};
+use azul_engine::{new_game, Color, Token, ALL_COLORS, WALL_DEST_COL};
 use azul_rl_env::{
     alphazero::training::{MctsAgentExt, MctsSearchResult, TrainableModel},
-    ActionEncoder, AgentInput, AlphaZeroMctsAgent, AlphaZeroNet, BasicFeatureExtractor, MctsConfig,
-    FeatureExtractor, ACTION_SPACE_SIZE,
+    ActionEncoder, AgentInput, AlphaZeroMctsAgent, AlphaZeroNet, BasicFeatureExtractor,
+    FeatureExtractor, MctsConfig, ACTION_SPACE_SIZE,
 };
 
 #[derive(Parser, Debug)]
@@ -84,9 +84,13 @@ fn make_color_set_denial_state(
     }
 
     // Player 1 has 4/5 of threat_color already (rows 1..4).
-    for r in 1..BOARD_SIZE {
-        let col = WALL_DEST_COL[r][threat_color as usize] as usize;
-        state.players[1].wall[r][col] = Some(threat_color);
+    for (dest_cols, wall_row) in WALL_DEST_COL
+        .iter()
+        .zip(state.players[1].wall.iter_mut())
+        .skip(1)
+    {
+        let col = dest_cols[threat_color as usize] as usize;
+        wall_row[col] = Some(threat_color);
     }
     // Missing tile in row 0.
     let missing_col_row0 = WALL_DEST_COL[0][threat_color as usize] as usize;
@@ -122,11 +126,14 @@ fn run_single_tactic(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    let checkpoint_path = args.checkpoint.or_else(find_latest_checkpoint).ok_or_else(|| {
-        "No checkpoint found. Run training first or specify --checkpoint".to_string()
-    })?;
+    let checkpoint_path = args
+        .checkpoint
+        .or_else(find_latest_checkpoint)
+        .ok_or_else(|| {
+            "No checkpoint found. Run training first or specify --checkpoint".to_string()
+        })?;
 
-    eprintln!("Loading checkpoint: {:?}", checkpoint_path);
+    eprintln!("Loading checkpoint: {checkpoint_path:?}");
 
     let features = BasicFeatureExtractor::new(2);
     let obs_size = features.obs_size();

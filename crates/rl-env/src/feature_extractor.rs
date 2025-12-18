@@ -5,7 +5,7 @@
 
 use azul_engine::{
     GameState, PlayerIdx, Token, ALL_COLORS, BOARD_SIZE, FLOOR_CAPACITY, MAX_FACTORIES,
-    MAX_PLAYERS, TILE_COLORS, TILES_PER_COLOR, WALL_DEST_COL,
+    MAX_PLAYERS, TILES_PER_COLOR, TILE_COLORS, WALL_DEST_COL,
 };
 
 use super::Observation;
@@ -86,8 +86,11 @@ impl BasicFeatureExtractor {
         let wall_derived_features = (BOARD_SIZE * 2) + TILE_COLORS + (TILE_COLORS * BOARD_SIZE);
         let floor_features = TILE_COLORS + 1 + 1; // counts per color + FP marker + total count
         let score_feature = 1;
-        let per_player_features =
-            pattern_line_features + wall_features + wall_derived_features + floor_features + score_feature;
+        let per_player_features = pattern_line_features
+            + wall_features
+            + wall_derived_features
+            + floor_features
+            + score_feature;
 
         // All players
         let all_players_features = per_player_features * MAX_PLAYERS;
@@ -215,29 +218,33 @@ impl FeatureExtractor for BasicFeatureExtractor {
                 let mut row_counts = [0u8; BOARD_SIZE];
                 let mut col_counts = [0u8; BOARD_SIZE];
                 let mut color_counts = [0u8; TILE_COLORS];
-                for row in 0..BOARD_SIZE {
-                    for col in 0..BOARD_SIZE {
-                        if let Some(color) = player_state.wall[row][col] {
+                for (row, wall_row) in player_state.wall.iter().enumerate() {
+                    for (col, cell) in wall_row.iter().enumerate() {
+                        if let Some(color) = cell {
                             row_counts[row] += 1;
                             col_counts[col] += 1;
-                            color_counts[color as usize] += 1;
+                            color_counts[*color as usize] += 1;
                         }
                     }
                 }
-                for row in 0..BOARD_SIZE {
-                    write_feature!(row_counts[row] as f32 / BOARD_SIZE as f32);
+                for &count in &row_counts {
+                    write_feature!(count as f32 / BOARD_SIZE as f32);
                 }
-                for col in 0..BOARD_SIZE {
-                    write_feature!(col_counts[col] as f32 / BOARD_SIZE as f32);
+                for &count in &col_counts {
+                    write_feature!(count as f32 / BOARD_SIZE as f32);
                 }
                 for color in ALL_COLORS {
                     write_feature!(color_counts[color as usize] as f32 / BOARD_SIZE as f32);
                 }
                 for color in ALL_COLORS {
                     let mut missing_row: Option<usize> = None;
-                    for row in 0..BOARD_SIZE {
-                        let col = WALL_DEST_COL[row][color as usize] as usize;
-                        if player_state.wall[row][col].is_none() {
+                    for (row, (&dest_cols, wall_row)) in WALL_DEST_COL
+                        .iter()
+                        .zip(player_state.wall.iter())
+                        .enumerate()
+                    {
+                        let col = dest_cols[color as usize] as usize;
+                        if wall_row[col].is_none() {
                             missing_row = Some(row);
                             break;
                         }
@@ -272,15 +279,15 @@ impl FeatureExtractor for BasicFeatureExtractor {
                 // Inactive player slot - zero out
                 let pattern_line_features = BOARD_SIZE * (TILE_COLORS + 1);
                 let wall_features = BOARD_SIZE * BOARD_SIZE;
-                let wall_derived_features = (BOARD_SIZE * 2) + TILE_COLORS + (TILE_COLORS * BOARD_SIZE);
+                let wall_derived_features =
+                    (BOARD_SIZE * 2) + TILE_COLORS + (TILE_COLORS * BOARD_SIZE);
                 let floor_features = TILE_COLORS + 1 + 1;
                 let score_feature = 1;
-                let per_player_features =
-                    pattern_line_features
-                        + wall_features
-                        + wall_derived_features
-                        + floor_features
-                        + score_feature;
+                let per_player_features = pattern_line_features
+                    + wall_features
+                    + wall_derived_features
+                    + floor_features
+                    + score_feature;
 
                 for _ in 0..per_player_features {
                     write_feature!(0.0);
@@ -310,7 +317,11 @@ impl FeatureExtractor for BasicFeatureExtractor {
         write_feature!(state.round as f32 / 10.0); // Typically games last 5-6 rounds
 
         // 7. Final-round triggered flag
-        write_feature!(if state.final_round_triggered { 1.0 } else { 0.0 });
+        write_feature!(if state.final_round_triggered {
+            1.0
+        } else {
+            0.0
+        });
 
         // 8. Supply: bag + discard counts per color
         for color in ALL_COLORS {
@@ -339,7 +350,7 @@ mod tests {
         let extractor = BasicFeatureExtractor::new(2);
         let obs_size = extractor.obs_size();
         assert!(obs_size > 0);
-        println!("Observation size: {}", obs_size);
+        println!("Observation size: {obs_size}");
     }
 
     #[test]

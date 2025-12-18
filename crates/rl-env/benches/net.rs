@@ -21,7 +21,7 @@ fn bench_net_forward(c: &mut Criterion) {
             |b, &batch_size| {
                 let mut net = AlphaZeroNet::new(obs_size, hidden_size);
                 // Create random input batch
-                let obs = Array::zeros::<f32>(&[batch_size as i32, obs_size as i32]).unwrap();
+                let obs = Array::zeros::<f32>(&[batch_size, obs_size as i32]).unwrap();
 
                 b.iter(|| {
                     let (policy, value) = net.forward_batch(black_box(&obs));

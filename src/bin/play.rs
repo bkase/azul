@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    println!("{BOLD}Loading checkpoint:{RESET} {:?}", checkpoint_path);
+    println!("{BOLD}Loading checkpoint:{RESET} {checkpoint_path:?}");
 
     // Set up agent
     let features = BasicFeatureExtractor::new(2);

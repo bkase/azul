@@ -144,8 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             None => {
                 eprintln!(
-                    "Warning: Could not parse iteration from checkpoint filename {:?}, starting from 0",
-                    checkpoint_path
+                    "Warning: Could not parse iteration from checkpoint filename {checkpoint_path:?}, starting from 0"
                 );
                 0
             }
@@ -162,22 +161,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     self_play.mcts.root_dirichlet_eps = args.selfplay_dirichlet_eps;
     self_play.temp_cutoff_move = args.selfplay_temp_cutoff_move;
 
-    let mut arena = azul_rl_env::alphazero::training::ArenaConfig::default();
-    arena.games = args.arena_games;
+    let mut arena = azul_rl_env::alphazero::training::ArenaConfig {
+        games: args.arena_games,
+        ..Default::default()
+    };
     arena.mcts.num_simulations = args.arena_mcts_sims as u32;
     arena.win_rate_threshold = args.arena_threshold;
     arena.initial_best_checkpoint = args.arena_best_checkpoint.clone();
 
-    let teacher = args.teacher_checkpoint.clone().map(|checkpoint| TeacherConfig {
-        checkpoint,
-        games_per_iter: args.teacher_games_per_iter,
-        mcts: azul_rl_env::MctsConfig {
-            num_simulations: args.teacher_mcts_sims as u32,
-            nn_batch_size: args.mcts_nn_batch_size,
-            virtual_loss: args.mcts_virtual_loss,
-            ..Default::default()
-        },
-    });
+    let teacher = args
+        .teacher_checkpoint
+        .clone()
+        .map(|checkpoint| TeacherConfig {
+            checkpoint,
+            games_per_iter: args.teacher_games_per_iter,
+            mcts: azul_rl_env::MctsConfig {
+                num_simulations: args.teacher_mcts_sims as u32,
+                nn_batch_size: args.mcts_nn_batch_size,
+                virtual_loss: args.mcts_virtual_loss,
+                ..Default::default()
+            },
+        });
 
     let config = TrainerConfig {
         num_iters: args.num_iters,
@@ -205,12 +209,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.training_steps_per_iter
     );
     eprintln!("  Batch size: {}", config.batch_size);
-    eprintln!("  MCTS simulations: {}", config.self_play.mcts.num_simulations);
+    eprintln!(
+        "  MCTS simulations: {}",
+        config.self_play.mcts.num_simulations
+    );
     eprintln!(
         "  Self-play noise: alpha={} eps={}",
         config.self_play.mcts.root_dirichlet_alpha, config.self_play.mcts.root_dirichlet_eps
     );
-    eprintln!("  Self-play temp cutoff: {}", config.self_play.temp_cutoff_move);
+    eprintln!(
+        "  Self-play temp cutoff: {}",
+        config.self_play.temp_cutoff_move
+    );
     eprintln!("  MCTS NN batch size: {}", args.mcts_nn_batch_size);
     eprintln!("  MCTS virtual loss: {}", args.mcts_virtual_loss);
     eprintln!("  Replay buffer capacity: {}", config.replay_capacity);
@@ -219,7 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.arena.games, config.arena.mcts.num_simulations, config.arena.win_rate_threshold
     );
     if let Some(ref init_best) = config.arena.initial_best_checkpoint {
-        eprintln!("  Arena initial best: {:?}", init_best);
+        eprintln!("  Arena initial best: {init_best:?}");
     }
     if let Some(ref teacher) = config.teacher {
         eprintln!(

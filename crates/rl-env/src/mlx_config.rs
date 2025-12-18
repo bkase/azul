@@ -50,7 +50,8 @@ pub fn configure_mlx_for_current_thread() {
         let limits = *limits();
         unsafe {
             let mut _prev = 0usize;
-            let _ = mlx_sys::mlx_set_cache_limit(&mut _prev as *mut usize, limits.cache_limit_bytes);
+            let _ =
+                mlx_sys::mlx_set_cache_limit(&mut _prev as *mut usize, limits.cache_limit_bytes);
 
             if let Some(limit) = limits.memory_limit_bytes {
                 let mut _prev = 0usize;

@@ -112,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let obs = features.encode(&state, state.current_player);
     let (policy_logits, value) = agent.net.predict_single(&obs);
 
-    println!("Network Value Prediction: {:.4}", value);
+    println!("Network Value Prediction: {value:.4}");
     println!("  Note: Value is the predicted remaining advantage; near 0 can be normal.");
 
     // Compute softmax probabilities from logits
@@ -156,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let prior_std = prior_variance.sqrt();
     println!("\nPrior statistics:");
-    println!("  Std dev: {:.6}", prior_std);
+    println!("  Std dev: {prior_std:.6}");
     if prior_std < 0.01 {
         println!("  WARNING: Priors are nearly uniform - network may not have learned!");
     }
@@ -171,10 +171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .count();
     if floor_in_top5 > 0 {
-        println!(
-            "  WARNING: {} floor action(s) in top 5 priors!",
-            floor_in_top5
-        );
+        println!("  WARNING: {floor_in_top5} floor action(s) in top 5 priors!");
     }
 
     // Run MCTS search
@@ -241,7 +238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut found_issues = false;
     for (is_issue, msg) in issues {
         if is_issue {
-            println!("  [!] {}", msg);
+            println!("  [!] {msg}");
             found_issues = true;
         }
     }

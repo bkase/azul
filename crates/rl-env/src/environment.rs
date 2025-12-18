@@ -542,16 +542,14 @@ mod tests {
             // Verify rewards match
             assert_eq!(
                 next.rewards, rewards_1[idx],
-                "Rewards should be deterministic at step {}",
-                idx
+                "Rewards should be deterministic at step {idx}"
             );
 
             // Verify observations match
             assert_eq!(
                 next.observations[0].as_f32_slice().to_vec(),
                 observations_1[idx + 1],
-                "Observations should be deterministic at step {}",
-                idx
+                "Observations should be deterministic at step {idx}"
             );
 
             step2 = next;
@@ -617,7 +615,7 @@ mod tests {
             }
 
             // Episode should terminate
-            assert!(step.done, "Episode {} should terminate", episode);
+            assert!(step.done, "Episode {episode} should terminate");
 
             total_steps += steps_this_episode;
             total_score_p0 += env.game_state.players[0].score as i32;
@@ -630,9 +628,9 @@ mod tests {
         let avg_score_p1 = total_score_p1 as f64 / 100.0;
 
         println!("Integration test results:");
-        println!("  Average steps per episode: {:.1}", avg_steps);
-        println!("  Average score P0: {:.1}", avg_score_p0);
-        println!("  Average score P1: {:.1}", avg_score_p1);
+        println!("  Average steps per episode: {avg_steps:.1}");
+        println!("  Average score P0: {avg_score_p0:.1}");
+        println!("  Average score P1: {avg_score_p1:.1}");
 
         // Basic sanity checks
         assert!(avg_steps > 10.0, "Episodes should take more than 10 steps");

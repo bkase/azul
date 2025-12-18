@@ -14,8 +14,8 @@ pub mod alphazero;
 mod alphazero_net;
 mod environment;
 mod feature_extractor;
-mod mlx_config;
 mod mcts;
+mod mlx_config;
 #[cfg(feature = "profiling")]
 pub mod profiling;
 mod types;
@@ -26,6 +26,6 @@ pub use alphazero::*;
 pub use alphazero_net::AlphaZeroNet;
 pub use environment::*;
 pub use feature_extractor::*;
-pub(crate) use mlx_config::configure_mlx_for_current_thread;
 pub use mcts::{AlphaZeroMctsAgent, Batch, MctsConfig, PolicyValueNet};
+pub(crate) use mlx_config::configure_mlx_for_current_thread;
 pub use types::*;

@@ -643,7 +643,7 @@ where
     // can become invalid when arrays are stored for a long time.
     let examples: Vec<TrainingExample> = moves
         .into_iter()
-        .zip(values.into_iter())
+        .zip(values)
         .map(|(m, value)| {
             m.observation
                 .eval()
@@ -1240,8 +1240,7 @@ where
                     let tie_pct = 100.0 * (sp_ties as f32) / sp_games_f;
                     let zero_zero_pct = 100.0 * (sp_zero_zero_games as f32) / sp_games_f;
                     format!(
-                        " diff={:+.2} |diff|={:.2} ties={:.1}% 0-0={:.1}%",
-                        mean_diff, mean_abs_diff, tie_pct, zero_zero_pct
+                        " diff={mean_diff:+.2} |diff|={mean_abs_diff:.2} ties={tie_pct:.1}% 0-0={zero_zero_pct:.1}%"
                     )
                 } else {
                     String::new()
@@ -1378,9 +1377,7 @@ where
 
             let action = if candidate_turn {
                 candidate.sync_inference_backend();
-                candidate
-                    .select_action_and_policy(&input, 0.0, rng)
-                    .action
+                candidate.select_action_and_policy(&input, 0.0, rng).action
             } else {
                 best.sync_inference_backend();
                 best.select_action_and_policy(&input, 0.0, rng).action
@@ -1431,7 +1428,7 @@ where
             } else {
                 std::fs::copy(&candidate_path, &best_path).map_err(TrainingError::Io)?;
             }
-            eprintln!("Initialized best model: {:?}", best_path);
+            eprintln!("Initialized best model: {best_path:?}");
             return Ok(());
         }
 
@@ -1450,8 +1447,7 @@ where
         best.set_mcts_config(eval_mcts);
 
         // Deterministic arena RNG that doesn't perturb training RNG.
-        let base_seed =
-            0xA11CE5EED_u64 ^ (iter as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let base_seed = 0xA11CE5EED_u64 ^ (iter as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let mut eval_rng = rand::rngs::StdRng::seed_from_u64(base_seed);
 
         let mut wins = 0usize;
@@ -1494,15 +1490,13 @@ where
         let mean_diff = score_diff_sum / games;
 
         eprintln!(
-            "Arena@{iter:06}: W-L-T={wins}-{losses}-{ties} (trunc={truncated}) | win_rate={:.3} | mean_diff={:+.2}",
-            win_rate, mean_diff
+            "Arena@{iter:06}: W-L-T={wins}-{losses}-{ties} (trunc={truncated}) | win_rate={win_rate:.3} | mean_diff={mean_diff:+.2}"
         );
 
         if win_rate >= self.cfg.arena.win_rate_threshold && mean_diff > 0.0 {
             std::fs::copy(&candidate_path, &best_path).map_err(TrainingError::Io)?;
             eprintln!(
-                "Promoted checkpoint_{iter:06}.safetensors -> best (win_rate={:.3}, mean_diff={:+.2})",
-                win_rate, mean_diff
+                "Promoted checkpoint_{iter:06}.safetensors -> best (win_rate={win_rate:.3}, mean_diff={mean_diff:+.2})"
             );
         }
 
@@ -1605,7 +1599,7 @@ mod tests {
 
         // Sum should be approximately 0
         let sum: f32 = outcomes.iter().sum();
-        assert!(sum.abs() < 1e-5, "Outcomes should sum to ~0, got {}", sum);
+        assert!(sum.abs() < 1e-5, "Outcomes should sum to ~0, got {sum}");
 
         // Higher score should have positive outcome
         assert!(
@@ -1655,9 +1649,7 @@ mod tests {
         for (i, &outcome) in outcomes.iter().enumerate() {
             assert!(
                 outcome.abs() < 1e-5,
-                "Player {} outcome should be ~0 in tie, got {}",
-                i,
-                outcome
+                "Player {i} outcome should be ~0 in tie, got {outcome}"
             );
         }
     }
@@ -1681,19 +1673,15 @@ mod tests {
 
         assert_eq!(
             obs.shape(),
-            &[batch_size as i32, obs_size as i32],
+            &[batch_size, obs_size as i32],
             "Observations should have shape [B, obs_size]"
         );
         assert_eq!(
             pi.shape(),
-            &[batch_size as i32, ACTION_SPACE_SIZE as i32],
+            &[batch_size, ACTION_SPACE_SIZE as i32],
             "Policies should have shape [B, ACTION_SPACE_SIZE]"
         );
-        assert_eq!(
-            z.shape(),
-            &[batch_size as i32],
-            "Values should have shape [B]"
-        );
+        assert_eq!(z.shape(), &[batch_size], "Values should have shape [B]");
     }
 
     #[test]
@@ -1707,8 +1695,7 @@ mod tests {
         // With logits heavily favoring action 0, loss should be small
         assert!(
             loss < 0.1,
-            "Loss should be small for matching logits, got {}",
-            loss
+            "Loss should be small for matching logits, got {loss}"
         );
     }
 
@@ -1980,8 +1967,7 @@ mod tests {
             let sum: f32 = ex.policy.iter().sum();
             assert!(
                 (sum - 1.0).abs() < 1e-3,
-                "Policy should sum to ~1, got {}",
-                sum
+                "Policy should sum to ~1, got {sum}"
             );
 
             // Value should be in reasonable range
@@ -2124,23 +2110,19 @@ mod tests {
         // Assert loss is finite
         assert!(
             policy_loss.is_finite(),
-            "Policy loss should be finite, got {}",
-            policy_loss
+            "Policy loss should be finite, got {policy_loss}"
         );
         assert!(
             value_loss.is_finite(),
-            "Value loss should be finite, got {}",
-            value_loss
+            "Value loss should be finite, got {value_loss}"
         );
         assert!(
             policy_loss >= 0.0,
-            "Policy loss should be non-negative, got {}",
-            policy_loss
+            "Policy loss should be non-negative, got {policy_loss}"
         );
         assert!(
             value_loss >= 0.0,
-            "Value loss should be non-negative, got {}",
-            value_loss
+            "Value loss should be non-negative, got {value_loss}"
         );
     }
 
@@ -2181,7 +2163,7 @@ mod tests {
 
         // Replay buffer should have examples
         assert!(
-            trainer.replay.len() > 0,
+            !trainer.replay.is_empty(),
             "Replay buffer should have examples after training"
         );
     }
@@ -2222,8 +2204,7 @@ mod tests {
         // Should complete within 2 seconds (generous threshold for CI)
         assert!(
             elapsed.as_secs() < 2,
-            "Self-play episode should complete quickly, took {:?}",
-            elapsed
+            "Self-play episode should complete quickly, took {elapsed:?}"
         );
     }
 
@@ -2269,7 +2250,7 @@ mod tests {
         // With start_iter=5, we only run 2 iterations (5 and 6), so fewer examples.
         // This is a weak test but verifies the loop respects start_iter.
         assert!(
-            trainer.replay.len() > 0,
+            !trainer.replay.is_empty(),
             "Replay buffer should have examples after training"
         );
     }
@@ -2395,7 +2376,7 @@ mod tests {
             losses.push(loss_val);
 
             if step % 50 == 0 {
-                eprintln!("Overfit test step {}: loss = {:.6}", step, loss_val);
+                eprintln!("Overfit test step {step}: loss = {loss_val:.6}");
             }
         }
 
@@ -2405,15 +2386,11 @@ mod tests {
         let final_policy_slice = final_policy.as_slice::<f32>();
 
         // Value should be close to target (1.0)
-        eprintln!(
-            "Initial value: {:.4}, Final value: {:.4} (target: 1.0)",
-            initial_val, final_val
-        );
+        eprintln!("Initial value: {initial_val:.4}, Final value: {final_val:.4} (target: 1.0)");
         assert!(
             final_val > 0.8,
-            "Network should learn to predict value ~1.0, got {:.4}. \
-             This indicates the value head is not receiving gradients correctly.",
-            final_val
+            "Network should learn to predict value ~1.0, got {final_val:.4}. \
+             This indicates the value head is not receiving gradients correctly."
         );
 
         // Policy should heavily favor action 0
@@ -2426,27 +2403,21 @@ mod tests {
             exps[0] / sum
         };
 
-        eprintln!("Action 0 probability: {:.4} (target: 1.0)", action0_prob);
+        eprintln!("Action 0 probability: {action0_prob:.4} (target: 1.0)");
         assert!(
             action0_prob > 0.8,
-            "Network should learn to assign high probability to action 0, got {:.4}. \
-             This indicates the policy head is not receiving gradients correctly.",
-            action0_prob
+            "Network should learn to assign high probability to action 0, got {action0_prob:.4}. \
+             This indicates the policy head is not receiving gradients correctly."
         );
 
         // Loss should have decreased significantly
         let initial_loss = losses[0];
         let final_loss = *losses.last().unwrap();
-        eprintln!(
-            "Initial loss: {:.6}, Final loss: {:.6}",
-            initial_loss, final_loss
-        );
+        eprintln!("Initial loss: {initial_loss:.6}, Final loss: {final_loss:.6}");
         assert!(
             final_loss < initial_loss * 0.1,
             "Loss should decrease by at least 10x when overfitting, \
-             initial: {:.6}, final: {:.6}",
-            initial_loss,
-            final_loss
+             initial: {initial_loss:.6}, final: {final_loss:.6}"
         );
     }
 }
