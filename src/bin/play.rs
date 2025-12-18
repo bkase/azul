@@ -25,7 +25,7 @@ struct Args {
     checkpoint: Option<PathBuf>,
 
     /// MCTS simulations per AI move (more = stronger but slower)
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 800)]
     mcts_sims: usize,
 
     /// Play as player 1 (AI goes first) instead of player 0
@@ -83,6 +83,12 @@ fn find_latest_checkpoint() -> Option<PathBuf> {
         return None;
     }
 
+    // Prefer arena-gated best model if present.
+    let best = checkpoint_dir.join("best.safetensors");
+    if best.exists() {
+        return Some(best);
+    }
+
     let mut checkpoints: Vec<_> = std::fs::read_dir(&checkpoint_dir)
         .ok()?
         .filter_map(|e| e.ok())
@@ -120,6 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         num_simulations: args.mcts_sims as u32,
         temperature: 0.0,          // Argmax for stronger play
         root_dirichlet_alpha: 0.0, // No exploration noise
+        root_dirichlet_eps: 0.0,   // No exploration noise
         ..Default::default()
     };
 

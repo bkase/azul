@@ -5,7 +5,7 @@ use rand::Rng;
 
 use super::{
     create_zero_observation, ActionEncoder, ActionId, EnvConfig, EnvStep, FeatureExtractor,
-    Observation, Reward, RewardScheme, StepError, ACTION_SPACE_SIZE,
+    Observation, Reward, StepError, ACTION_SPACE_SIZE,
 };
 
 #[cfg(feature = "profiling")]
@@ -208,33 +208,12 @@ impl<F: FeatureExtractor> Environment for AzulEnv<F> {
 
         self.game_state = apply_result.state;
 
-        // 7. Compute rewards based on RewardScheme
+        // 7. Compute rewards (dense score deltas)
         let mut rewards = [0.0f32; MAX_PLAYERS];
-
-        match self.config.reward_scheme {
-            RewardScheme::DenseScoreDelta => {
-                for p in 0..self.game_state.num_players as usize {
-                    let new_score = self.game_state.players[p].score;
-                    let delta = (new_score - prev_scores[p]) as f32;
-                    rewards[p] = delta;
-                }
-            }
-
-            RewardScheme::TerminalOnly => {
-                if self.game_state.phase == Phase::GameOver {
-                    let mut final_scores = [0.0f32; MAX_PLAYERS];
-                    #[allow(clippy::needless_range_loop)]
-                    for p in 0..self.game_state.num_players as usize {
-                        final_scores[p] = self.game_state.players[p].score as f32;
-                    }
-                    let n = self.game_state.num_players as usize;
-                    let mean = final_scores[0..n].iter().sum::<f32>() / (n as f32);
-                    for p in 0..n {
-                        rewards[p] = final_scores[p] - mean;
-                    }
-                }
-                // Non-terminal steps have zero reward (already initialized)
-            }
+        for p in 0..self.game_state.num_players as usize {
+            let new_score = self.game_state.players[p].score;
+            let delta = (new_score - prev_scores[p]) as f32;
+            rewards[p] = delta;
         }
 
         // 8. Update done flag
@@ -320,7 +299,7 @@ pub fn self_play_episode<F: FeatureExtractor, A: super::Agent>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Agent, BasicFeatureExtractor, ObservationExt};
+    use crate::{Agent, BasicFeatureExtractor, ObservationExt, RewardScheme};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
@@ -490,83 +469,6 @@ mod tests {
                     "Cumulative reward {} should equal final score {} for player {}",
                     cum_rewards[player],
                     final_score,
-                    player
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_terminal_only_reward_correctness() {
-        // Test TerminalOnly reward scheme
-        let config = EnvConfig {
-            num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
-            include_full_state_in_step: false,
-        };
-        let features = BasicFeatureExtractor::new(2);
-        let mut env = AzulEnv::new(config, features);
-        let mut agent = super::super::RandomAgent::new();
-
-        let mut rng = StdRng::seed_from_u64(42);
-
-        // Run 5 episodes
-        for _ in 0..5 {
-            let mut step = env.reset(&mut rng);
-            let mut non_terminal_rewards_are_zero = true;
-
-            while !step.done {
-                let p = step.current_player as usize;
-                let input = super::super::AgentInput {
-                    observation: &step.observations[p],
-                    legal_action_mask: &step.legal_action_mask,
-                    current_player: step.current_player,
-                    state: None,
-                };
-
-                let action_id = agent.select_action(&input, &mut rng);
-                let next_step = env.step(action_id, &mut rng).expect("step should succeed");
-
-                // Check non-terminal rewards are zero
-                if !next_step.done {
-                    for player in 0..env.game_state.num_players as usize {
-                        if next_step.rewards[player] != 0.0 {
-                            non_terminal_rewards_are_zero = false;
-                        }
-                    }
-                }
-
-                step = next_step;
-            }
-
-            assert!(
-                non_terminal_rewards_are_zero,
-                "Non-terminal rewards should be zero"
-            );
-
-            // Verify terminal rewards
-            // 1. Sum to zero (zero-sum property)
-            let n = env.game_state.num_players as usize;
-            let reward_sum: f32 = step.rewards[0..n].iter().sum();
-            assert!(
-                reward_sum.abs() < 0.001,
-                "Terminal rewards should sum to zero, got {}",
-                reward_sum
-            );
-
-            // 2. Equal to score minus mean
-            let final_scores: Vec<f32> = (0..n)
-                .map(|p| env.game_state.players[p].score as f32)
-                .collect();
-            let mean = final_scores.iter().sum::<f32>() / n as f32;
-
-            for player in 0..n {
-                let expected = final_scores[player] - mean;
-                assert!(
-                    (step.rewards[player] - expected).abs() < 0.001,
-                    "Terminal reward {} should equal {} for player {}",
-                    step.rewards[player],
-                    expected,
                     player
                 );
             }

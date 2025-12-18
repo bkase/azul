@@ -8,9 +8,9 @@ use clap::Parser;
 use rand::SeedableRng;
 
 use azul_rl_env::{
-    alphazero::training::{TrainableModel, Trainer, TrainerConfig},
+    alphazero::training::{TeacherConfig, TrainableModel, Trainer, TrainerConfig},
     AlphaZeroMctsAgent, AlphaZeroNet, AzulEnv, BasicFeatureExtractor, EnvConfig, FeatureExtractor,
-    MctsConfig, RewardScheme,
+    RewardScheme,
 };
 
 /// Parse iteration number from checkpoint filename.
@@ -34,19 +34,19 @@ struct Args {
     num_iters: usize,
 
     /// Self-play games per iteration
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = 25)]
     games_per_iter: usize,
 
     /// Training steps per iteration
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 25)]
     training_steps: usize,
 
     /// Batch size for training
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 128)]
     batch_size: usize,
 
     /// MCTS simulations per move
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 128)]
     mcts_sims: usize,
 
     /// MCTS neural network batch size (for batched inference)
@@ -56,6 +56,50 @@ struct Args {
     /// MCTS virtual loss for parallel path selection
     #[arg(long, default_value_t = 1.0)]
     mcts_virtual_loss: f32,
+
+    /// Checkpoint + arena evaluation interval (in iterations)
+    #[arg(long, default_value_t = 10)]
+    eval_interval: usize,
+
+    /// Self-play Dirichlet alpha (root noise concentration)
+    #[arg(long, default_value_t = 0.3)]
+    selfplay_dirichlet_alpha: f32,
+
+    /// Self-play Dirichlet epsilon (mixing fraction vs prior)
+    #[arg(long, default_value_t = 0.25)]
+    selfplay_dirichlet_eps: f32,
+
+    /// Self-play temperature cutoff move (tau=1 before, tau=0 after)
+    #[arg(long, default_value_t = 200)]
+    selfplay_temp_cutoff_move: usize,
+
+    /// Arena evaluation games per eval interval (0 disables gating)
+    #[arg(long, default_value_t = 20)]
+    arena_games: usize,
+
+    /// Arena MCTS simulations per move
+    #[arg(long, default_value_t = 800)]
+    arena_mcts_sims: usize,
+
+    /// Arena promotion threshold on (wins + 0.5 * ties) / games
+    #[arg(long, default_value_t = 0.55)]
+    arena_threshold: f32,
+
+    /// Initialize `best.safetensors` from this checkpoint (if best is missing)
+    #[arg(long)]
+    arena_best_checkpoint: Option<PathBuf>,
+
+    /// Optional fixed teacher checkpoint to play against during training (candidate-vs-teacher games)
+    #[arg(long)]
+    teacher_checkpoint: Option<PathBuf>,
+
+    /// Teacher games per iteration (0 disables teacher games)
+    #[arg(long, default_value_t = 0)]
+    teacher_games_per_iter: usize,
+
+    /// Teacher MCTS simulations per move
+    #[arg(long, default_value_t = 800)]
+    teacher_mcts_sims: usize,
 
     /// Directory for saving checkpoints (required unless --no-checkpoints is set)
     #[arg(long, required_unless_present = "no_checkpoints")]
@@ -110,18 +154,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0
     };
 
+    let mut self_play = azul_rl_env::alphazero::training::SelfPlayConfig::default();
+    self_play.mcts.num_simulations = args.mcts_sims as u32;
+    self_play.mcts.nn_batch_size = args.mcts_nn_batch_size;
+    self_play.mcts.virtual_loss = args.mcts_virtual_loss;
+    self_play.mcts.root_dirichlet_alpha = args.selfplay_dirichlet_alpha;
+    self_play.mcts.root_dirichlet_eps = args.selfplay_dirichlet_eps;
+    self_play.temp_cutoff_move = args.selfplay_temp_cutoff_move;
+
+    let mut arena = azul_rl_env::alphazero::training::ArenaConfig::default();
+    arena.games = args.arena_games;
+    arena.mcts.num_simulations = args.arena_mcts_sims as u32;
+    arena.win_rate_threshold = args.arena_threshold;
+    arena.initial_best_checkpoint = args.arena_best_checkpoint.clone();
+
+    let teacher = args.teacher_checkpoint.clone().map(|checkpoint| TeacherConfig {
+        checkpoint,
+        games_per_iter: args.teacher_games_per_iter,
+        mcts: azul_rl_env::MctsConfig {
+            num_simulations: args.teacher_mcts_sims as u32,
+            nn_batch_size: args.mcts_nn_batch_size,
+            virtual_loss: args.mcts_virtual_loss,
+            ..Default::default()
+        },
+    });
+
     let config = TrainerConfig {
         num_iters: args.num_iters,
         start_iter,
         self_play_games_per_iter: args.games_per_iter,
         training_steps_per_iter: training_steps,
         batch_size: args.batch_size,
-        self_play: azul_rl_env::alphazero::training::SelfPlayConfig {
-            mcts_simulations: args.mcts_sims,
-            ..Default::default()
-        },
+        self_play,
         replay_capacity: 50_000,
-        eval_interval: 10,
+        eval_interval: args.eval_interval,
+        arena,
+        teacher,
         checkpoint_dir: args.checkpoint_dir,
         ..Default::default()
     };
@@ -137,10 +205,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.training_steps_per_iter
     );
     eprintln!("  Batch size: {}", config.batch_size);
-    eprintln!("  MCTS simulations: {}", config.self_play.mcts_simulations);
+    eprintln!("  MCTS simulations: {}", config.self_play.mcts.num_simulations);
+    eprintln!(
+        "  Self-play noise: alpha={} eps={}",
+        config.self_play.mcts.root_dirichlet_alpha, config.self_play.mcts.root_dirichlet_eps
+    );
+    eprintln!("  Self-play temp cutoff: {}", config.self_play.temp_cutoff_move);
     eprintln!("  MCTS NN batch size: {}", args.mcts_nn_batch_size);
     eprintln!("  MCTS virtual loss: {}", args.mcts_virtual_loss);
     eprintln!("  Replay buffer capacity: {}", config.replay_capacity);
+    eprintln!(
+        "  Arena: games={} sims={} threshold={}",
+        config.arena.games, config.arena.mcts.num_simulations, config.arena.win_rate_threshold
+    );
+    if let Some(ref init_best) = config.arena.initial_best_checkpoint {
+        eprintln!("  Arena initial best: {:?}", init_best);
+    }
+    if let Some(ref teacher) = config.teacher {
+        eprintln!(
+            "  Teacher: {:?} games/iter={} sims={}",
+            teacher.checkpoint, teacher.games_per_iter, teacher.mcts.num_simulations
+        );
+    }
+    eprintln!("  Eval interval: {}", config.eval_interval);
     if let Some(ref dir) = config.checkpoint_dir {
         eprintln!("  Checkpoint directory: {dir:?}");
     } else {
@@ -169,13 +256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Weights loaded successfully.");
     }
 
-    let mcts_config = MctsConfig {
-        num_simulations: config.self_play.mcts_simulations as u32,
-        nn_batch_size: args.mcts_nn_batch_size,
-        virtual_loss: args.mcts_virtual_loss,
-        ..Default::default()
-    };
-    let agent = AlphaZeroMctsAgent::new(mcts_config, features, net);
+    let agent = AlphaZeroMctsAgent::new(config.self_play.mcts.clone(), features, net);
 
     // Create RNG
     let rng = rand::rngs::StdRng::seed_from_u64(42);

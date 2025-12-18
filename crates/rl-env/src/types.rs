@@ -30,11 +30,6 @@ pub enum RewardScheme {
     /// at every step, including all final bonuses at the terminal step.
     #[default]
     DenseScoreDelta,
-
-    /// Terminal-only reward:
-    /// rewards are 0 until game over; at game over:
-    /// reward[player] = final_score[player] - mean(final_scores).
-    TerminalOnly,
 }
 
 /// Environment configuration parameters

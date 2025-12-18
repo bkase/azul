@@ -11,5 +11,8 @@
 checkpoints*/
 cargo-flamegraph.trace/
 
+# Local model artifacts
+teacher*.safetensors
+
 # Local tooling artifacts
 /repomix-output.xml

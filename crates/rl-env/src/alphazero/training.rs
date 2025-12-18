@@ -93,14 +93,8 @@ pub struct SelfPlayConfig {
     /// Safety cap on maximum moves per game
     pub max_moves: usize,
 
-    /// Number of MCTS simulations per move
-    pub mcts_simulations: usize,
-
-    /// Dirichlet noise alpha parameter for root exploration
-    pub dirichlet_alpha: f32,
-
-    /// Dirichlet noise epsilon (fraction of noise vs prior)
-    pub dirichlet_eps: f32,
+    /// MCTS configuration for self-play (explicit to avoid silent no-ops).
+    pub mcts: crate::MctsConfig,
 
     /// Move number at which to switch temperature (tau=1 -> tau=0)
     pub temp_cutoff_move: usize,
@@ -110,15 +104,67 @@ impl Default for SelfPlayConfig {
     fn default() -> Self {
         Self {
             max_moves: 500,
-            mcts_simulations: 256,
-            dirichlet_alpha: 0.3,
-            dirichlet_eps: 0.25,
+            mcts: crate::MctsConfig {
+                num_simulations: 256,
+                temperature: 1.0,
+                root_dirichlet_alpha: 0.3,
+                root_dirichlet_eps: 0.25,
+                ..crate::MctsConfig::default()
+            },
             // Use high cutoff (200) so tau=1 for entire game during early training.
             // This prevents "locking in" garbage moves early via argmax selection.
             // With ~65 moves per game, this effectively means tau=1 throughout.
             temp_cutoff_move: 200,
         }
     }
+}
+
+/// Configuration for arena evaluation (candidate vs best) and best-model promotion.
+#[derive(Clone, Debug)]
+pub struct ArenaConfig {
+    /// Number of evaluation games per checkpoint interval.
+    /// Set to 0 to disable arena gating.
+    pub games: usize,
+
+    /// Safety cap on maximum moves per evaluation game.
+    pub max_moves: usize,
+
+    /// MCTS configuration for evaluation (should be deterministic: tau=0, no noise).
+    pub mcts: crate::MctsConfig,
+
+    /// Promote the candidate to best if (wins + 0.5 * ties) / games >= threshold.
+    pub win_rate_threshold: f32,
+
+    /// Optional initial best model checkpoint (copied to `best.safetensors` if missing).
+    pub initial_best_checkpoint: Option<PathBuf>,
+}
+
+impl Default for ArenaConfig {
+    fn default() -> Self {
+        Self {
+            games: 20,
+            max_moves: 500,
+            mcts: crate::MctsConfig {
+                num_simulations: 800,
+                ..crate::MctsConfig::default()
+            },
+            win_rate_threshold: 0.55,
+            initial_best_checkpoint: None,
+        }
+    }
+}
+
+/// Fixed teacher opponent configuration (optional).
+#[derive(Clone, Debug)]
+pub struct TeacherConfig {
+    /// Path to teacher checkpoint (safetensors).
+    pub checkpoint: PathBuf,
+
+    /// Number of teacher games per training iteration.
+    pub games_per_iter: usize,
+
+    /// MCTS configuration for the teacher (deterministic: tau=0, no noise).
+    pub mcts: crate::MctsConfig,
 }
 
 /// Configuration for the training loop.
@@ -165,6 +211,12 @@ pub struct TrainerConfig {
 
     /// Checkpoint/evaluation interval (in iterations)
     pub eval_interval: usize,
+
+    /// Arena evaluation configuration for best-model gating.
+    pub arena: ArenaConfig,
+
+    /// Optional fixed teacher opponent.
+    pub teacher: Option<TeacherConfig>,
 }
 
 impl Default for TrainerConfig {
@@ -173,8 +225,9 @@ impl Default for TrainerConfig {
             num_players: 2,
             replay_capacity: 100_000,
             batch_size: 256,
-            self_play_games_per_iter: 10,
-            training_steps_per_iter: 100,
+            // Favor fresh self-play over overfitting a tiny trickle of new data.
+            self_play_games_per_iter: 50,
+            training_steps_per_iter: 50,
             num_iters: 1000,
             start_iter: 0,
             learning_rate: 0.001,
@@ -184,6 +237,8 @@ impl Default for TrainerConfig {
             self_play: SelfPlayConfig::default(),
             checkpoint_dir: None,
             eval_interval: 10,
+            arena: ArenaConfig::default(),
+            teacher: None,
         }
     }
 }
@@ -405,9 +460,12 @@ pub fn self_play_game<F, A>(
 ) -> SelfPlayResult
 where
     F: FeatureExtractor,
-    A: MctsAgentExt,
+    A: MctsAgentExt + MctsAgentConfigExt,
 {
     crate::configure_mlx_for_current_thread();
+
+    // Ensure the caller-provided self-play MCTS settings actually take effect.
+    agent.set_mcts_config(self_play_cfg.mcts.clone());
 
     // 1. Reset env
     let mut step = env.reset(rng);
@@ -480,20 +538,30 @@ where
             .step(search_result.action, rng)
             .expect("env::step should not fail for legal action");
 
-        // Dense, zero-sum reward from acting player's perspective.
+        // Dense, zero-sum reward from acting player's perspective, computed from score deltas.
         //
-        // AzulEnv emits per-player score deltas; we convert that to a 2-player
-        // zero-sum signal by subtracting the opponent's delta and normalizing.
-        //
-        // This reward corresponds to a *change* in score difference, so the
-        // value targets represent "remaining advantage" (terminal value = 0).
-        let n = env.game_state.num_players as usize;
+        // We intentionally compute this from (prev_state, next_state) rather than trusting the
+        // environment reward scheme so self-play targets always match MCTS edge rewards.
+        let prev_state = step
+            .state
+            .as_ref()
+            .expect("self-play requires full GameState in EnvStep.state");
+        let next_state = next
+            .state
+            .as_ref()
+            .expect("self-play requires full GameState in EnvStep.state");
+        let n = prev_state.num_players as usize;
         let reward = if n == 2 {
             let opp = 1 - p;
-            (next.rewards[p] - next.rewards[opp]) / 20.0
+            let my_delta = (next_state.players[p].score - prev_state.players[p].score) as f32;
+            let opp_delta = (next_state.players[opp].score - prev_state.players[opp].score) as f32;
+            (my_delta - opp_delta) / 20.0
         } else {
-            let mean = next.rewards[0..n].iter().sum::<f32>() / (n as f32);
-            (next.rewards[p] - mean) / 20.0
+            let deltas: Vec<f32> = (0..n)
+                .map(|i| (next_state.players[i].score - prev_state.players[i].score) as f32)
+                .collect();
+            let mean = deltas.iter().sum::<f32>() / (n as f32);
+            (deltas[p] - mean) / 20.0
         };
 
         // Record pending move (now that we know the transition reward).
@@ -605,6 +673,232 @@ where
     }
 }
 
+fn teacher_play_game<F, A, T>(
+    env: &mut AzulEnv<F>,
+    candidate: &mut A,
+    teacher: &mut T,
+    candidate_player: u8,
+    self_play_cfg: &SelfPlayConfig,
+    teacher_cfg: &TeacherConfig,
+    rng: &mut impl Rng,
+) -> SelfPlayResult
+where
+    F: FeatureExtractor,
+    A: MctsAgentExt + MctsAgentConfigExt + InferenceSync,
+    T: MctsAgentExt + MctsAgentConfigExt + InferenceSync,
+{
+    crate::configure_mlx_for_current_thread();
+
+    candidate.set_mcts_config(self_play_cfg.mcts.clone());
+
+    let mut teacher_mcts = teacher_cfg.mcts.clone();
+    teacher_mcts.temperature = 0.0;
+    teacher_mcts.root_dirichlet_alpha = 0.0;
+    teacher_mcts.root_dirichlet_eps = 0.0;
+    teacher.set_mcts_config(teacher_mcts);
+
+    let mut step = env.reset(rng);
+    let mut move_idx = 0usize;
+
+    // Full move record (needed for correct value targets)
+    let mut move_records: Vec<(u8, f32)> = Vec::new();
+
+    // Candidate-only pending moves (for training examples + diagnostics)
+    let mut pending: Vec<PendingMove> = Vec::new();
+
+    let wall_tiles_start = count_wall_tiles(&env.game_state);
+
+    let mut floor_move_indices: Vec<usize> = Vec::new();
+    let mut had_non_floor_alternative: Vec<bool> = Vec::new();
+    let mut floor_move_min_overflow: Vec<Option<usize>> = Vec::new();
+
+    let mut total_floor_policy_mass = 0.0f32;
+    let mut num_moves_for_floor_mass = 0usize;
+
+    while !step.done && move_idx < self_play_cfg.max_moves {
+        let acting_player = step.current_player;
+        let p = acting_player as usize;
+        let is_candidate = acting_player == candidate_player;
+
+        // Candidate-only diagnostics
+        let non_floor_exists = if is_candidate {
+            has_non_floor_legal_action(&step.legal_action_mask)
+        } else {
+            false
+        };
+        let min_overflow = if is_candidate {
+            step.state
+                .as_ref()
+                .and_then(|state| compute_min_overflow(state, p, &step.legal_action_mask))
+        } else {
+            None
+        };
+
+        let input = AgentInput {
+            observation: &step.observations[p],
+            legal_action_mask: &step.legal_action_mask,
+            current_player: acting_player,
+            state: step.state.as_ref(),
+        };
+
+        let search_result = if is_candidate {
+            let temperature = if move_idx < self_play_cfg.temp_cutoff_move {
+                1.0
+            } else {
+                0.0
+            };
+            candidate.sync_inference_backend();
+            candidate.select_action_and_policy(&input, temperature, rng)
+        } else {
+            teacher.sync_inference_backend();
+            teacher.select_action_and_policy(&input, 0.0, rng)
+        };
+
+        if is_candidate {
+            let floor_mass =
+                compute_floor_policy_mass(&search_result.policy, &step.legal_action_mask);
+            total_floor_policy_mass += floor_mass;
+            num_moves_for_floor_mass += 1;
+
+            let is_floor_move = matches!(
+                ActionEncoder::decode(search_result.action).dest,
+                DraftDestination::Floor
+            );
+            if is_floor_move {
+                floor_move_indices.push(pending.len());
+                had_non_floor_alternative.push(non_floor_exists);
+                floor_move_min_overflow.push(min_overflow);
+            }
+        }
+
+        let next = env
+            .step(search_result.action, rng)
+            .expect("env::step should not fail for legal action");
+
+        let prev_state = step
+            .state
+            .as_ref()
+            .expect("teacher play requires full GameState in EnvStep.state");
+        let next_state = next
+            .state
+            .as_ref()
+            .expect("teacher play requires full GameState in EnvStep.state");
+        let n = prev_state.num_players as usize;
+        let reward = if n == 2 {
+            let opp = 1 - p;
+            let my_delta = (next_state.players[p].score - prev_state.players[p].score) as f32;
+            let opp_delta = (next_state.players[opp].score - prev_state.players[opp].score) as f32;
+            (my_delta - opp_delta) / 20.0
+        } else {
+            let deltas: Vec<f32> = (0..n)
+                .map(|i| (next_state.players[i].score - prev_state.players[i].score) as f32)
+                .collect();
+            let mean = deltas.iter().sum::<f32>() / (n as f32);
+            (deltas[p] - mean) / 20.0
+        };
+
+        move_records.push((acting_player, reward));
+
+        if is_candidate {
+            pending.push(PendingMove {
+                player: acting_player,
+                observation: step.observations[p].clone(),
+                policy: search_result.policy.clone(),
+                action: search_result.action,
+                reward,
+            });
+        }
+
+        step = next;
+        move_idx += 1;
+    }
+
+    let num_players = env.game_state.num_players;
+    let n = num_players as usize;
+    let final_scores: Vec<i16> = (0..n).map(|p| env.game_state.players[p].score).collect();
+    let was_truncated = env.game_state.phase != Phase::GameOver;
+
+    let wall_tiles_end = count_wall_tiles(&env.game_state);
+    let wall_tiles_placed = wall_tiles_end.saturating_sub(wall_tiles_start);
+
+    let floor_moves = floor_move_indices.len();
+    let optional_floor_moves = had_non_floor_alternative.iter().filter(|&&x| x).count();
+
+    let mut dominated_floor_moves = 0usize;
+    let mut overflow_floor_moves = 0usize;
+    for (i, &had_alt) in had_non_floor_alternative.iter().enumerate() {
+        if had_alt {
+            match floor_move_min_overflow.get(i) {
+                Some(Some(0)) => dominated_floor_moves += 1,
+                Some(Some(_)) => overflow_floor_moves += 1,
+                Some(None) | None => {}
+            }
+        }
+    }
+
+    // Compute value targets for ALL moves, then index into candidate moves.
+    let mut values = vec![0.0f32; move_records.len()];
+    let mut next_value = 0.0f32;
+    let mut next_player: Option<u8> = None;
+
+    for i in (0..move_records.len()).rev() {
+        let (player, reward) = move_records[i];
+        let continuation = match next_player {
+            None => 0.0,
+            Some(np) if np == player => next_value,
+            Some(_) => -next_value,
+        };
+
+        let v = (reward + continuation).clamp(-1.0, 1.0);
+        values[i] = v;
+        next_value = v;
+        next_player = Some(player);
+    }
+
+    // Convert PendingMove -> TrainingExample (candidate moves only).
+    let mut examples: Vec<TrainingExample> = Vec::with_capacity(pending.len());
+    let mut candidate_move_idx = 0usize;
+    for m in pending.into_iter() {
+        // Candidate moves occur in order, but may not be every ply; scan forward in move_records.
+        while candidate_move_idx < move_records.len()
+            && move_records[candidate_move_idx].0 != candidate_player
+        {
+            candidate_move_idx += 1;
+        }
+        let value = values
+            .get(candidate_move_idx)
+            .copied()
+            .unwrap_or(0.0)
+            .clamp(-1.0, 1.0);
+        candidate_move_idx += 1;
+
+        m.observation
+            .eval()
+            .expect("Failed to evaluate observation");
+        let obs_vec = m.observation.as_slice::<f32>().to_vec();
+        examples.push(TrainingExample {
+            observation: obs_vec,
+            policy: m.policy,
+            action: m.action,
+            value,
+        });
+    }
+
+    SelfPlayResult {
+        examples,
+        floor_moves,
+        optional_floor_moves,
+        dominated_floor_moves,
+        overflow_floor_moves,
+        wall_tiles_placed,
+        was_truncated,
+        final_scores,
+        num_players,
+        total_floor_policy_mass,
+        num_moves_for_floor_mass,
+    }
+}
+
 /// Extension trait for MCTS agents that can return both action and policy.
 pub trait MctsAgentExt {
     /// Run MCTS search and return both the selected action and the policy distribution.
@@ -616,11 +910,17 @@ pub trait MctsAgentExt {
     ) -> MctsSearchResult;
 }
 
+/// Extension trait for MCTS agents that expose a mutable MctsConfig.
+pub trait MctsAgentConfigExt {
+    fn set_mcts_config(&mut self, config: crate::MctsConfig);
+    fn mcts_config(&self) -> crate::MctsConfig;
+}
+
 /// Trainer state for running the AlphaZero training loop.
 pub struct Trainer<F, M>
 where
     F: FeatureExtractor,
-    M: TrainableModel + MctsAgentExt + ModuleParameters,
+    M: TrainableModel + MctsAgentExt + MctsAgentConfigExt + ModuleParameters,
 {
     /// The environment for self-play
     pub env: AzulEnv<F>,
@@ -639,12 +939,21 @@ where
 
     /// Adam optimizer for gradient updates
     pub optimizer: Adam,
+
+    /// Optional fixed teacher opponent (loaded once, used during self-play generation).
+    pub teacher: Option<M>,
 }
 
 impl<F, M> Trainer<F, M>
 where
     F: FeatureExtractor + Clone + Send,
-    M: TrainableModel + MctsAgentExt + ModuleParameters + Clone + Send + InferenceSync,
+    M: TrainableModel
+        + MctsAgentExt
+        + MctsAgentConfigExt
+        + ModuleParameters
+        + Clone
+        + Send
+        + InferenceSync,
 {
     /// Create a new trainer with the given components.
     pub fn new(env: AzulEnv<F>, agent: M, cfg: TrainerConfig, rng: rand::rngs::StdRng) -> Self {
@@ -657,12 +966,15 @@ where
             cfg,
             rng,
             optimizer,
+            teacher: None,
         }
     }
 
     /// Run the main training loop.
     pub fn run(&mut self) -> Result<(), TrainingError> {
         crate::configure_mlx_for_current_thread();
+
+        self.ensure_teacher_loaded()?;
 
         for iter in self.cfg.start_iter..self.cfg.num_iters {
             #[cfg(feature = "profiling")]
@@ -773,6 +1085,72 @@ where
                 }
             }
 
+            // Optional: mix in candidate-vs-teacher games (sequential).
+            //
+            // We run these sequentially to avoid concurrency hazards when the teacher and
+            // candidate share the same inference worker (cloning shares the worker Arc).
+            let mut tp_games = 0usize;
+            let mut tp_moves = 0usize;
+            let mut tp_wins = 0usize;
+            let mut tp_losses = 0usize;
+            let mut tp_ties = 0usize;
+            let mut tp_truncated_games = 0usize;
+            let mut tp_score_diff_sum = 0.0f32;
+
+            if let (Some(teacher_cfg), Some(teacher_template)) =
+                (self.cfg.teacher.clone(), self.teacher.clone())
+            {
+                if teacher_cfg.games_per_iter > 0 {
+                    for g in 0..teacher_cfg.games_per_iter {
+                        let seed = self.rng.next_u64();
+                        let mut local_rng = rand::rngs::StdRng::seed_from_u64(seed);
+
+                        let mut local_env = self.env.clone();
+                        let mut local_candidate = self.agent.clone();
+                        let mut local_teacher = teacher_template.clone();
+
+                        // Alternate seats to reduce first-player bias.
+                        let candidate_player = if g % 2 == 0 { 0 } else { 1 };
+
+                        let result = teacher_play_game(
+                            &mut local_env,
+                            &mut local_candidate,
+                            &mut local_teacher,
+                            candidate_player,
+                            &self_play_cfg,
+                            &teacher_cfg,
+                            &mut local_rng,
+                        );
+
+                        tp_games += 1;
+                        tp_moves += result.examples.len();
+                        if result.was_truncated {
+                            tp_truncated_games += 1;
+                        }
+
+                        if result.final_scores.len() >= 2 {
+                            let c = result.final_scores[candidate_player as usize] as f32;
+                            let t = result.final_scores[(1 - candidate_player) as usize] as f32;
+                            let diff = c - t;
+                            tp_score_diff_sum += diff;
+                            if result.was_truncated {
+                                tp_ties += 1;
+                            } else if diff > 0.0 {
+                                tp_wins += 1;
+                            } else if diff < 0.0 {
+                                tp_losses += 1;
+                            } else {
+                                tp_ties += 1;
+                            }
+                        }
+
+                        if !result.was_truncated {
+                            self.replay.extend(result.examples);
+                        }
+                    }
+                }
+            }
+
             // Drop timer to record self-play time before training starts
             #[cfg(feature = "profiling")]
             drop(_t_sp);
@@ -809,10 +1187,11 @@ where
             #[cfg(feature = "profiling")]
             drop(_t_train);
 
-            // 3. Optional checkpoint
-            if let Some(ref dir) = self.cfg.checkpoint_dir {
-                if iter % self.cfg.eval_interval == 0 {
-                    self.save_checkpoint(dir, iter)?;
+            // 3. Optional checkpoint + arena eval
+            if iter % self.cfg.eval_interval == 0 {
+                if let Some(dir) = self.cfg.checkpoint_dir.clone() {
+                    self.save_checkpoint(&dir, iter)?;
+                    self.arena_eval_and_update_best(&dir, iter)?;
                 }
             }
 
@@ -868,8 +1247,26 @@ where
                     String::new()
                 };
 
+                let teacher_stats = if tp_games > 0 {
+                    let tp_games_f = tp_games as f32;
+                    let tp_moves_per_game = tp_moves as f32 / tp_games_f;
+                    let tp_mean_diff = tp_score_diff_sum / tp_games_f;
+                    format!(
+                        " | teacher: games={} moves/g={:.1} W-L-T={}-{}-{} diff={:+.2} trunc={:.1}%",
+                        tp_games,
+                        tp_moves_per_game,
+                        tp_wins,
+                        tp_losses,
+                        tp_ties,
+                        tp_mean_diff,
+                        100.0 * (tp_truncated_games as f32) / tp_games_f
+                    )
+                } else {
+                    String::new()
+                };
+
                 eprintln!(
-                    "Iter {}/{} | replay: {} | loss: {:.4} | sp: moves/g={:.1} floor={:.1}% dom={:.1}% ovf={:.1}% pi_floor={:.1}% wall={:.1} |z|={:.3} trunc={:.1}%{}",
+                    "Iter {}/{} | replay: {} | loss: {:.4} | sp: moves/g={:.1} floor={:.1}% dom={:.1}% ovf={:.1}% pi_floor={:.1}% wall={:.1} |z|={:.3} trunc={:.1}%{}{}",
                     iter,
                     self.cfg.num_iters,
                     self.replay.len(),
@@ -882,7 +1279,8 @@ where
                     wall_tiles_per_game,
                     abs_z,
                     trunc_pct,
-                    two_player_stats
+                    two_player_stats,
+                    teacher_stats
                 );
             }
             #[cfg(feature = "profiling")]
@@ -953,6 +1351,193 @@ where
         let _ = eval_params(ModuleParameters::parameters(&self.agent));
 
         Ok(loss.item::<f32>())
+    }
+
+    fn arena_play_single_game(
+        &self,
+        candidate: &mut M,
+        best: &mut M,
+        cfg: &ArenaConfig,
+        rng: &mut impl Rng,
+        candidate_is_player0: bool,
+    ) -> (i16, i16, bool) {
+        let mut env = self.env.clone();
+        let mut step = env.reset(rng);
+
+        let mut move_idx = 0usize;
+        while !step.done && move_idx < cfg.max_moves {
+            let p = step.current_player as usize;
+            let candidate_turn = (p == 0) == candidate_is_player0;
+
+            let input = AgentInput {
+                observation: &step.observations[p],
+                legal_action_mask: &step.legal_action_mask,
+                current_player: step.current_player,
+                state: step.state.as_ref(),
+            };
+
+            let action = if candidate_turn {
+                candidate.sync_inference_backend();
+                candidate
+                    .select_action_and_policy(&input, 0.0, rng)
+                    .action
+            } else {
+                best.sync_inference_backend();
+                best.select_action_and_policy(&input, 0.0, rng).action
+            };
+
+            step = env
+                .step(action, rng)
+                .expect("env::step should not fail for legal action");
+            move_idx += 1;
+        }
+
+        let cand_player = if candidate_is_player0 { 0 } else { 1 };
+        let best_player = 1 - cand_player;
+
+        let cand_score = env.game_state.players[cand_player].score;
+        let best_score = env.game_state.players[best_player].score;
+
+        (cand_score, best_score, !step.done)
+    }
+
+    fn arena_eval_and_update_best(
+        &mut self,
+        dir: &std::path::Path,
+        iter: usize,
+    ) -> Result<(), TrainingError> {
+        if self.cfg.arena.games == 0 {
+            return Ok(());
+        }
+        if self.cfg.num_players != 2 {
+            eprintln!(
+                "Arena gating disabled: AlphaZero MCTS only supports 2 players (cfg.num_players={})",
+                self.cfg.num_players
+            );
+            return Ok(());
+        }
+        if !self.env.config.include_full_state_in_step {
+            eprintln!("Arena gating disabled: env must include full GameState in EnvStep");
+            return Ok(());
+        }
+
+        let best_path = dir.join("best.safetensors");
+        let candidate_path = dir.join(format!("checkpoint_{iter:06}.safetensors"));
+
+        // First checkpoint becomes best by default.
+        if !best_path.exists() {
+            if let Some(ref init_best) = self.cfg.arena.initial_best_checkpoint {
+                std::fs::copy(init_best, &best_path).map_err(TrainingError::Io)?;
+            } else {
+                std::fs::copy(&candidate_path, &best_path).map_err(TrainingError::Io)?;
+            }
+            eprintln!("Initialized best model: {:?}", best_path);
+            return Ok(());
+        }
+
+        // Build candidate/best agents. NOTE: clones share the inference worker; we sync it before
+        // every move so each side evaluates with its own weights.
+        let mut candidate = self.agent.clone();
+        let mut best = self.agent.clone();
+        best.load(&best_path).map_err(TrainingError::Io)?;
+
+        // Force deterministic eval settings regardless of config defaults.
+        let mut eval_mcts = self.cfg.arena.mcts.clone();
+        eval_mcts.temperature = 0.0;
+        eval_mcts.root_dirichlet_alpha = 0.0;
+        eval_mcts.root_dirichlet_eps = 0.0;
+        candidate.set_mcts_config(eval_mcts.clone());
+        best.set_mcts_config(eval_mcts);
+
+        // Deterministic arena RNG that doesn't perturb training RNG.
+        let base_seed =
+            0xA11CE5EED_u64 ^ (iter as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let mut eval_rng = rand::rngs::StdRng::seed_from_u64(base_seed);
+
+        let mut wins = 0usize;
+        let mut losses = 0usize;
+        let mut ties = 0usize;
+        let mut truncated = 0usize;
+        let mut score_diff_sum = 0.0f32;
+
+        for g in 0..self.cfg.arena.games {
+            let seed = eval_rng.next_u64();
+            let mut game_rng = rand::rngs::StdRng::seed_from_u64(seed);
+
+            // Alternate seats to reduce first-player bias.
+            let candidate_is_player0 = g % 2 == 0;
+            let (cand_score, best_score, was_truncated) = self.arena_play_single_game(
+                &mut candidate,
+                &mut best,
+                &self.cfg.arena,
+                &mut game_rng,
+                candidate_is_player0,
+            );
+
+            let diff = (cand_score - best_score) as f32;
+            score_diff_sum += diff;
+
+            if was_truncated {
+                truncated += 1;
+                ties += 1;
+            } else if cand_score > best_score {
+                wins += 1;
+            } else if cand_score < best_score {
+                losses += 1;
+            } else {
+                ties += 1;
+            }
+        }
+
+        let games = self.cfg.arena.games.max(1) as f32;
+        let win_rate = (wins as f32 + 0.5 * ties as f32) / games;
+        let mean_diff = score_diff_sum / games;
+
+        eprintln!(
+            "Arena@{iter:06}: W-L-T={wins}-{losses}-{ties} (trunc={truncated}) | win_rate={:.3} | mean_diff={:+.2}",
+            win_rate, mean_diff
+        );
+
+        if win_rate >= self.cfg.arena.win_rate_threshold && mean_diff > 0.0 {
+            std::fs::copy(&candidate_path, &best_path).map_err(TrainingError::Io)?;
+            eprintln!(
+                "Promoted checkpoint_{iter:06}.safetensors -> best (win_rate={:.3}, mean_diff={:+.2})",
+                win_rate, mean_diff
+            );
+        }
+
+        Ok(())
+    }
+
+    fn ensure_teacher_loaded(&mut self) -> Result<(), TrainingError> {
+        let Some(cfg) = self.cfg.teacher.clone() else {
+            return Ok(());
+        };
+        if cfg.games_per_iter == 0 {
+            return Ok(());
+        }
+        if self.teacher.is_some() {
+            return Ok(());
+        }
+
+        if !self.env.config.include_full_state_in_step {
+            return Err(TrainingError::Mlx(
+                "Teacher games require EnvConfig.include_full_state_in_step=true".to_string(),
+            ));
+        }
+
+        let mut teacher = self.agent.clone();
+        teacher.load(&cfg.checkpoint).map_err(TrainingError::Io)?;
+
+        let mut mcts = cfg.mcts.clone();
+        mcts.temperature = 0.0;
+        mcts.root_dirichlet_alpha = 0.0;
+        mcts.root_dirichlet_eps = 0.0;
+        teacher.set_mcts_config(mcts);
+        teacher.sync_inference_backend();
+
+        self.teacher = Some(teacher);
+        Ok(())
     }
 
     /// Save a checkpoint to disk.
@@ -1264,6 +1849,16 @@ mod tests {
         }
     }
 
+    impl MctsAgentConfigExt for StubMctsAgent {
+        fn set_mcts_config(&mut self, config: crate::MctsConfig) {
+            self.agent.config = config;
+        }
+
+        fn mcts_config(&self) -> crate::MctsConfig {
+            self.agent.config.clone()
+        }
+    }
+
     impl TrainableModel for StubMctsAgent {
         fn param_count(&self) -> usize {
             1
@@ -1345,7 +1940,7 @@ mod tests {
 
         let config = EnvConfig {
             num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
+            reward_scheme: RewardScheme::DenseScoreDelta,
             include_full_state_in_step: true,
         };
         let features = BasicFeatureExtractor::new(2);
@@ -1354,7 +1949,13 @@ mod tests {
         let mut agent = StubMctsAgent::new(2, 4); // Small num_simulations for speed
         let self_play_cfg = SelfPlayConfig {
             max_moves: 500,
-            mcts_simulations: 4,
+            mcts: crate::MctsConfig {
+                num_simulations: 4,
+                temperature: 1.0,
+                root_dirichlet_alpha: 0.0,
+                root_dirichlet_eps: 0.0,
+                ..crate::MctsConfig::default()
+            },
             ..Default::default()
         };
 
@@ -1399,7 +2000,7 @@ mod tests {
 
         let config = EnvConfig {
             num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
+            reward_scheme: RewardScheme::DenseScoreDelta,
             include_full_state_in_step: true,
         };
         let features = BasicFeatureExtractor::new(2);
@@ -1408,7 +2009,13 @@ mod tests {
         let mut agent = StubMctsAgent::new(2, 2);
         let self_play_cfg = SelfPlayConfig {
             max_moves: 5, // Very small limit
-            mcts_simulations: 2,
+            mcts: crate::MctsConfig {
+                num_simulations: 2,
+                temperature: 1.0,
+                root_dirichlet_alpha: 0.0,
+                root_dirichlet_eps: 0.0,
+                ..crate::MctsConfig::default()
+            },
             ..Default::default()
         };
 
@@ -1429,7 +2036,7 @@ mod tests {
 
         let config = EnvConfig {
             num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
+            reward_scheme: RewardScheme::DenseScoreDelta,
             include_full_state_in_step: true,
         };
 
@@ -1439,7 +2046,13 @@ mod tests {
         let mut agent1 = StubMctsAgent::new(2, 4);
         let self_play_cfg = SelfPlayConfig {
             max_moves: 50,
-            mcts_simulations: 4,
+            mcts: crate::MctsConfig {
+                num_simulations: 4,
+                temperature: 1.0,
+                root_dirichlet_alpha: 0.0,
+                root_dirichlet_eps: 0.0,
+                ..crate::MctsConfig::default()
+            },
             ..Default::default()
         };
 
@@ -1538,7 +2151,7 @@ mod tests {
 
         let config = EnvConfig {
             num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
+            reward_scheme: RewardScheme::DenseScoreDelta,
             include_full_state_in_step: true,
         };
         let features = BasicFeatureExtractor::new(2);
@@ -1581,7 +2194,7 @@ mod tests {
 
         let config = EnvConfig {
             num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
+            reward_scheme: RewardScheme::DenseScoreDelta,
             include_full_state_in_step: true,
         };
         let features = BasicFeatureExtractor::new(2);
@@ -1590,7 +2203,13 @@ mod tests {
         let mut agent = StubMctsAgent::new(2, 4);
         let self_play_cfg = SelfPlayConfig {
             max_moves: 200,
-            mcts_simulations: 4,
+            mcts: crate::MctsConfig {
+                num_simulations: 4,
+                temperature: 1.0,
+                root_dirichlet_alpha: 0.0,
+                root_dirichlet_eps: 0.0,
+                ..crate::MctsConfig::default()
+            },
             ..Default::default()
         };
 
@@ -1615,7 +2234,7 @@ mod tests {
 
         let config = EnvConfig {
             num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
+            reward_scheme: RewardScheme::DenseScoreDelta,
             include_full_state_in_step: true,
         };
         let features = BasicFeatureExtractor::new(2);
@@ -1662,7 +2281,7 @@ mod tests {
 
         let config = EnvConfig {
             num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
+            reward_scheme: RewardScheme::DenseScoreDelta,
             include_full_state_in_step: true,
         };
         let features = BasicFeatureExtractor::new(2);

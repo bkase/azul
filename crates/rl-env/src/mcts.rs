@@ -481,9 +481,11 @@ impl Default for MctsConfig {
         Self {
             num_simulations: 256,
             cpuct: 1.5,
-            root_dirichlet_eps: 0.25,
-            root_dirichlet_alpha: 0.3,
-            temperature: 1.0,
+            // Default to evaluation / human-play settings (deterministic, no noise).
+            // Self-play should explicitly enable exploration noise + sampling.
+            root_dirichlet_eps: 0.0,
+            root_dirichlet_alpha: 0.0,
+            temperature: 0.0,
             max_depth: 200,
             nn_batch_size: 32,
             virtual_loss: 1.0,
@@ -1318,6 +1320,20 @@ where
     }
 }
 
+impl<F, N> crate::alphazero::training::MctsAgentConfigExt for AlphaZeroMctsAgent<F, N>
+where
+    F: FeatureExtractor,
+    N: PolicyValueNet + Clone + Send + 'static,
+{
+    fn set_mcts_config(&mut self, config: MctsConfig) {
+        self.config = config;
+    }
+
+    fn mcts_config(&self) -> MctsConfig {
+        self.config.clone()
+    }
+}
+
 impl<F, N> crate::alphazero::training::TrainableModel for AlphaZeroMctsAgent<F, N>
 where
     F: FeatureExtractor,
@@ -1452,7 +1468,9 @@ mod tests {
         let config = MctsConfig::default();
         assert_eq!(config.num_simulations, 256);
         assert_eq!(config.cpuct, 1.5);
-        assert_eq!(config.temperature, 1.0);
+        assert_eq!(config.temperature, 0.0);
+        assert_eq!(config.root_dirichlet_alpha, 0.0);
+        assert_eq!(config.root_dirichlet_eps, 0.0);
         assert_eq!(config.max_depth, 200);
         // Batching defaults
         assert_eq!(config.nn_batch_size, 32);
@@ -1521,7 +1539,7 @@ mod tests {
     fn test_mcts_agent_selects_legal_action() {
         let config = EnvConfig {
             num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
+            reward_scheme: RewardScheme::DenseScoreDelta,
             include_full_state_in_step: true,
         };
         let features = BasicFeatureExtractor::new(2);
@@ -1555,7 +1573,7 @@ mod tests {
     fn test_mcts_never_selects_illegal_action() {
         let config = EnvConfig {
             num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
+            reward_scheme: RewardScheme::DenseScoreDelta,
             include_full_state_in_step: true,
         };
         let features = BasicFeatureExtractor::new(2);
@@ -1593,7 +1611,7 @@ mod tests {
     fn test_mcts_full_game_smoke() {
         let config = EnvConfig {
             num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
+            reward_scheme: RewardScheme::DenseScoreDelta,
             include_full_state_in_step: true,
         };
         let features = BasicFeatureExtractor::new(2);
@@ -1636,7 +1654,7 @@ mod tests {
     fn test_mcts_determinism() {
         let config = EnvConfig {
             num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
+            reward_scheme: RewardScheme::DenseScoreDelta,
             include_full_state_in_step: true,
         };
 
@@ -1713,7 +1731,7 @@ mod tests {
     fn test_agent_input_state_is_some() {
         let config = EnvConfig {
             num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
+            reward_scheme: RewardScheme::DenseScoreDelta,
             include_full_state_in_step: true,
         };
         let features = BasicFeatureExtractor::new(2);
@@ -1732,7 +1750,7 @@ mod tests {
     fn test_batched_mcts_invariants() {
         let config = EnvConfig {
             num_players: 2,
-            reward_scheme: RewardScheme::TerminalOnly,
+            reward_scheme: RewardScheme::DenseScoreDelta,
             include_full_state_in_step: true,
         };
         let features = BasicFeatureExtractor::new(2);
@@ -2095,6 +2113,97 @@ mod tests {
             result.action, pattern_line_id,
             "MCTS should choose pattern line (id {}) over floor; got action id {}",
             pattern_line_id, result.action
+        );
+    }
+
+    #[test]
+    fn test_mcts_denies_opponent_color_set_bonus() {
+        use azul_engine::{Color, Token, ALL_COLORS, BOARD_SIZE, WALL_DEST_COL};
+
+        // Construct a near-terminal position where:
+        // - Player 1 has 4/5 of Blue on their wall (missing only row 0),
+        // - Center contains exactly one Blue tile (and one distractor tile),
+        // - Game will end at this round end (player 0 already has a complete row),
+        // so taking Blue now is the only way to deny opponent's +10 color-set bonus.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let mut state = azul_engine::new_game(2, 0, &mut rng);
+
+        state.current_player = 0;
+
+        // Clear factories (force drafting from center only).
+        for f in 0..state.factories.num_factories as usize {
+            state.factories.factories[f].len = 0;
+        }
+
+        // Center contains FP marker + Blue + Red.
+        state.center.len = 3;
+        state.center.items[0] = Token::FirstPlayerMarker;
+        state.center.items[1] = Token::Tile(Color::Blue);
+        state.center.items[2] = Token::Tile(Color::Red);
+
+        // Clear per-player transient state.
+        for p in 0..2 {
+            state.players[p].pattern_lines[0].color = None;
+            state.players[p].pattern_lines[0].count = 0;
+            state.players[p].floor.len = 0;
+            state.players[p].score = 0;
+        }
+
+        // Force game end at end-of-round by giving player 0 a complete row (row 4).
+        for color in ALL_COLORS {
+            let col = WALL_DEST_COL[4][color as usize] as usize;
+            state.players[0].wall[4][col] = Some(color);
+        }
+
+        // Player 1 has 4 Blues already (rows 1..4).
+        for r in 1..BOARD_SIZE {
+            let col = WALL_DEST_COL[r][Color::Blue as usize] as usize;
+            state.players[1].wall[r][col] = Some(Color::Blue);
+        }
+        // Missing Blue in row 0.
+        let blue_col_row0 = WALL_DEST_COL[0][Color::Blue as usize] as usize;
+        state.players[1].wall[0][blue_col_row0] = None;
+
+        let legal = azul_engine::legal_actions(&state);
+        assert!(
+            legal.iter().any(|a| a.color == Color::Blue),
+            "Expected at least one legal action that takes Blue"
+        );
+
+        // With a uniform network and deterministic MCTS, the agent should take Blue to deny +10.
+        let features = BasicFeatureExtractor::new(2);
+        let dummy_net = DummyNet::uniform(0.0);
+        let mcts_config = MctsConfig {
+            num_simulations: 800,
+            temperature: 0.0,
+            root_dirichlet_alpha: 0.0,
+            root_dirichlet_eps: 0.0,
+            ..MctsConfig::default()
+        };
+        let mut agent = AlphaZeroMctsAgent::new(mcts_config, features.clone(), dummy_net);
+
+        let obs = features.encode(&state, state.current_player);
+        let mut legal_mask = vec![false; ACTION_SPACE_SIZE];
+        for a in &legal {
+            let id = ActionEncoder::encode(a);
+            legal_mask[id as usize] = true;
+        }
+
+        let input = AgentInput {
+            observation: &obs,
+            legal_action_mask: &legal_mask,
+            current_player: state.current_player,
+            state: Some(&state),
+        };
+
+        let mut mcts_rng = rand::rngs::StdRng::seed_from_u64(42);
+        let result = agent.select_action_and_policy(&input, 0.0, &mut mcts_rng);
+        let chosen = ActionEncoder::decode(result.action);
+
+        assert_eq!(
+            chosen.color,
+            Color::Blue,
+            "MCTS should take Blue to deny opponent's +10 color-set bonus; chose {chosen:?}"
         );
     }
 
