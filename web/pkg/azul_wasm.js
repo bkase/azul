@@ -267,6 +267,26 @@ export class GameStateHandle {
         }
     }
     /**
+     * @returns {any}
+     */
+    state_view() {
+        const ret = wasm.gamestatehandle_state_view(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @returns {any}
+     */
+    legal_action_details() {
+        const ret = wasm.gamestatehandle_legal_action_details(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * @param {number} action_id
      * @returns {any}
      */

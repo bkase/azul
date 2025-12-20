@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use azul_engine::{
@@ -127,6 +128,16 @@ fn color_name(color: Color) -> &'static str {
         Color::Red => "Red",
         Color::Black => "Black",
         Color::Teal => "Teal",
+    }
+}
+
+fn color_slug(color: Color) -> &'static str {
+    match color {
+        Color::Blue => "blue",
+        Color::Yellow => "amber",
+        Color::Red => "rose",
+        Color::Black => "zinc",
+        Color::Teal => "emerald",
     }
 }
 
@@ -457,13 +468,62 @@ fn render_state_text(state: &GameState, highlight_player: Option<u8>) -> String 
     out
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct ApplyResult {
     reward: f32,
     game_over: bool,
     scores: Option<Vec<i16>>,
     current_player: u8,
     round: u16,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ActionSourceView {
+    Factory { index: u8 },
+    Center,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ActionDestView {
+    Pattern { row: u8 },
+    Floor,
+}
+
+#[derive(Serialize)]
+struct ActionDetail {
+    id: u16,
+    source: ActionSourceView,
+    color: String,
+    dest: ActionDestView,
+}
+
+#[derive(Serialize)]
+struct PatternLineView {
+    color: Option<String>,
+    count: u8,
+    capacity: u8,
+}
+
+#[derive(Serialize)]
+struct PlayerView {
+    pattern_lines: Vec<PatternLineView>,
+    wall: Vec<Vec<Option<String>>>,
+    floor: Vec<String>,
+    score: i16,
+}
+
+#[derive(Serialize)]
+struct GameStateView {
+    num_players: u8,
+    current_player: u8,
+    round: u16,
+    final_round_triggered: bool,
+    factories: Vec<Vec<String>>,
+    center: Vec<String>,
+    has_origin: bool,
+    players: Vec<PlayerView>,
 }
 
 #[wasm_bindgen]
@@ -553,6 +613,104 @@ impl GameStateHandle {
     }
 
     #[wasm_bindgen]
+    pub fn state_view(&self) -> Result<JsValue, JsValue> {
+        let mut factories = Vec::with_capacity(self.state.factories.num_factories as usize);
+        for f in 0..self.state.factories.num_factories as usize {
+            let factory = &self.state.factories.factories[f];
+            let mut tiles = Vec::with_capacity(factory.len as usize);
+            for i in 0..factory.len as usize {
+                tiles.push(color_slug(factory.tiles[i]).to_string());
+            }
+            factories.push(tiles);
+        }
+
+        let mut center = Vec::new();
+        let mut has_origin = false;
+        for i in 0..self.state.center.len as usize {
+            match self.state.center.items[i] {
+                Token::Tile(color) => center.push(color_slug(color).to_string()),
+                Token::FirstPlayerMarker => has_origin = true,
+            }
+        }
+
+        let mut players = Vec::with_capacity(self.state.num_players as usize);
+        for p in 0..self.state.num_players as usize {
+            let player = &self.state.players[p];
+            let mut pattern_lines = Vec::with_capacity(BOARD_SIZE);
+            for r in 0..BOARD_SIZE {
+                let line = &player.pattern_lines[r];
+                pattern_lines.push(PatternLineView {
+                    color: line.color.map(|c| color_slug(c).to_string()),
+                    count: line.count,
+                    capacity: (r + 1) as u8,
+                });
+            }
+
+            let mut wall = vec![vec![None; BOARD_SIZE]; BOARD_SIZE];
+            for row in 0..BOARD_SIZE {
+                for col in 0..BOARD_SIZE {
+                    wall[row][col] = player.wall[row][col].map(|c| color_slug(c).to_string());
+                }
+            }
+
+            let mut floor = Vec::with_capacity(player.floor.len as usize);
+            for i in 0..player.floor.len as usize {
+                match player.floor.slots[i] {
+                    Token::Tile(color) => floor.push(color_slug(color).to_string()),
+                    Token::FirstPlayerMarker => floor.push("origin".to_string()),
+                }
+            }
+
+            players.push(PlayerView {
+                pattern_lines,
+                wall,
+                floor,
+                score: player.score,
+            });
+        }
+
+        let view = GameStateView {
+            num_players: self.state.num_players,
+            current_player: self.state.current_player,
+            round: self.state.round,
+            final_round_triggered: self.state.final_round_triggered,
+            factories,
+            center,
+            has_origin,
+            players,
+        };
+
+        serde_wasm_bindgen::to_value(&view)
+            .map_err(|e| JsValue::from_str(&format!("Failed to serialize state: {e}")))
+    }
+
+    #[wasm_bindgen]
+    pub fn legal_action_details(&self) -> Result<JsValue, JsValue> {
+        let actions = legal_actions(&self.state);
+        let mut details = Vec::with_capacity(actions.len());
+        for action in actions {
+            let id = ActionEncoder::encode(&action);
+            let source = match action.source {
+                DraftSource::Factory(idx) => ActionSourceView::Factory { index: idx },
+                DraftSource::Center => ActionSourceView::Center,
+            };
+            let dest = match action.dest {
+                DraftDestination::PatternLine(row) => ActionDestView::Pattern { row },
+                DraftDestination::Floor => ActionDestView::Floor,
+            };
+            details.push(ActionDetail {
+                id,
+                source,
+                color: color_slug(action.color).to_string(),
+                dest,
+            });
+        }
+
+        serde_wasm_bindgen::to_value(&details)
+            .map_err(|e| JsValue::from_str(&format!("Failed to serialize actions: {e}")))
+    }
+
+    #[wasm_bindgen]
     pub fn apply_action_id(&mut self, action_id: u16) -> Result<JsValue, JsValue> {
         let action = ActionEncoder::decode(action_id);
         let current_state = std::mem::take(&mut self.state);
@@ -596,4 +754,3 @@ impl GameStateHandle {
         })
     }
 }
-

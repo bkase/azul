@@ -1,95 +1,47 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="h-full">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Azul vs Model</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <title>Azul AlphaZero</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              display: ["Space Grotesk", "system-ui", "sans-serif"],
+              mono: ["JetBrains Mono", "ui-monospace", "monospace"],
+            },
+          },
+        },
+      };
+    </script>
+    <style>
+      @keyframes fade-up {
+        from {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .fade-up {
+        animation: fade-up 0.4s ease-out both;
+      }
+    </style>
   </head>
-  <body>
-    <main class="app">
-      <header class="hero">
-        <div>
-          <p class="eyebrow">Azul • AlphaZero</p>
-          <h1>Play the best.safetensors model in your browser</h1>
-          <p class="subtitle">
-            Inference runs via jax-js. Game logic and feature extraction run in WASM.
-          </p>
-        </div>
-        <div class="status-card" id="status-card">
-          <div class="status-row">
-            <span>Status</span>
-            <strong id="status-text">Loading…</strong>
-          </div>
-          <div class="status-row">
-            <span>Round</span>
-            <strong id="round-text">–</strong>
-          </div>
-          <div class="status-row">
-            <span>Scores</span>
-            <strong id="scores-text">–</strong>
-          </div>
-        </div>
-      </header>
-
-      <section class="grid">
-        <div class="panel board">
-          <div class="panel-header">
-            <h2>Board</h2>
-            <div class="pill" id="turn-pill">–</div>
-          </div>
-          <pre id="board-text" class="board-text"></pre>
-        </div>
-
-        <div class="panel controls">
-          <div class="panel-header">
-            <h2>Controls</h2>
-          </div>
-          <div class="control-group">
-            <label class="label">Checkpoint</label>
-            <div class="row">
-              <input id="checkpoint-url" value="../checkpoints6/best.safetensors" />
-              <button id="reload-model">Reload</button>
-            </div>
-          </div>
-
-          <div class="control-group">
-            <label class="label">MCTS simulations</label>
-            <div class="row">
-              <input id="mcts-sims" type="number" min="32" max="2000" step="32" value="400" />
-              <button id="new-game">New game</button>
-            </div>
-          </div>
-
-          <div class="control-group">
-            <label class="label">Play order</label>
-            <div class="row">
-              <label class="toggle">
-                <input type="checkbox" id="ai-first" />
-                <span>AI moves first</span>
-              </label>
-            </div>
-          </div>
-
-          <div class="control-group">
-            <label class="label">Your move</label>
-            <select id="action-select"></select>
-            <div class="row">
-              <button id="play-move">Play selected</button>
-              <button class="secondary" id="random-move">Random move</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="panel log">
-          <div class="panel-header">
-            <h2>Move log</h2>
-          </div>
-          <div id="log" class="log-body"></div>
-        </div>
-      </section>
-    </main>
-
+  <body class="h-full bg-slate-50 text-slate-900">
+    <div id="root" class="h-full"></div>
     <script type="module" src="./main.js"></script>
   </body>
 </html>

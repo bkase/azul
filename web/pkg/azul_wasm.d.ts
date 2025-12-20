@@ -15,6 +15,8 @@ export class GameStateHandle {
   action_id_to_string(action_id: number): string;
   encode_observation(player: number): Float32Array;
   render_text(highlight_player?: number | null): string;
+  state_view(): any;
+  legal_action_details(): any;
   apply_action_id(action_id: number): any;
 }
 
@@ -42,6 +44,8 @@ export interface InitOutput {
   readonly gamestatehandle_action_id_to_string: (a: number, b: number) => [number, number];
   readonly gamestatehandle_encode_observation: (a: number, b: number) => [number, number];
   readonly gamestatehandle_render_text: (a: number, b: number) => [number, number];
+  readonly gamestatehandle_state_view: (a: number) => [number, number, number];
+  readonly gamestatehandle_legal_action_details: (a: number) => [number, number, number];
   readonly gamestatehandle_apply_action_id: (a: number, b: number) => [number, number, number];
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
