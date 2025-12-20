@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "azul-web",
+      "dependencies": {
+        "@jax-js/jax": "^0.1.1",
+      },
+    },
+  },
+  "packages": {
+    "@jax-js/jax": ["@jax-js/jax@0.1.1", "", {}, "sha512-sanbRkU++bbidGk7ewcm/qsY9bmS9qqhaIDxszRq/BisKT8GZ9j610ryHP3u8u51F/OycjKybn4N4gMDigNWPQ=="],
+  }
+}

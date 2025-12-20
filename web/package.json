@@ -1,0 +1,11 @@
+{
+  "name": "azul-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build --target browser --outfile main.js --external ./pkg/azul_wasm.js main.ts"
+  },
+  "dependencies": {
+    "@jax-js/jax": "^0.1.1"
+  }
+}

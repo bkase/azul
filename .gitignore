@@ -16,3 +16,6 @@ teacher*.safetensors
 
 # Local tooling artifacts
 /repomix-output.xml
+
+# Web tooling
+/web/node_modules/
