@@ -197,7 +197,7 @@ const sizeClasses = {
 type NodeProps = {
   type: string;
   size?: keyof typeof sizeClasses;
-  onClick?: () => void;
+  onClick?: React.MouseEventHandler<HTMLDivElement>;
   disabled?: boolean;
   selected?: boolean;
   preview?: boolean;
@@ -1209,22 +1209,33 @@ const App = () => {
                     </div>
                   )}
                   {aIdx === aiPlayer ? (
-                    <div className="flex items-center gap-2 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200">
-                      <SlidersHorizontal size={8} className="text-slate-400" />
-                      <input
-                        type="number"
-                        value={mctsSims}
-                        onChange={(e) =>
-                          setMctsSims(Math.max(100, Number.parseInt(e.target.value, 10) || 0))
-                        }
-                        className="w-12 bg-transparent text-[9px] font-mono font-bold text-blue-600 outline-none"
-                        step="100"
-                        min={100}
-                      />
+                    <div className="flex flex-col items-end gap-1 sm:flex-row sm:items-center sm:gap-2">
+                      <span
+                        data-role="ai-score"
+                        className="text-[10px] font-mono font-bold text-slate-600 leading-none"
+                      >
+                        Score {agent.score}
+                      </span>
+                      <div className="flex items-center gap-2 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200">
+                        <SlidersHorizontal size={8} className="text-slate-400" />
+                        <input
+                          type="number"
+                          value={mctsSims}
+                          onChange={(e) =>
+                            setMctsSims(Math.max(100, Number.parseInt(e.target.value, 10) || 0))
+                          }
+                          className="w-12 bg-transparent text-[9px] font-mono font-bold text-blue-600 outline-none"
+                          step="100"
+                          min={100}
+                        />
+                      </div>
                     </div>
                   ) : (
-                    <span className="text-[11px] font-mono font-bold text-blue-600">
-                      {agent.score}
+                    <span
+                      data-role="human-score"
+                      className="text-[11px] font-mono font-bold text-blue-600"
+                    >
+                      Score {agent.score}
                     </span>
                   )}
                 </div>

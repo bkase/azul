@@ -33714,25 +33714,42 @@ var App = () => {
                           children: "Thinking"
                         }, undefined, false, undefined, this),
                         aIdx === aiPlayer ? /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
-                          className: "flex items-center gap-2 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200",
+                          className: "flex flex-col items-end gap-1 sm:flex-row sm:items-center sm:gap-2",
                           children: [
-                            /* @__PURE__ */ jsx_dev_runtime.jsxDEV(SlidersHorizontal, {
-                              size: 8,
-                              className: "text-slate-400"
-                            }, undefined, false, undefined, this),
-                            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("input", {
-                              type: "number",
-                              value: mctsSims,
-                              onChange: (e2) => setMctsSims(Math.max(100, Number.parseInt(e2.target.value, 10) || 0)),
-                              className: "w-12 bg-transparent text-[9px] font-mono font-bold text-blue-600 outline-none",
-                              step: "100",
-                              min: 100
-                            }, undefined, false, undefined, this)
+                            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("span", {
+                              "data-role": "ai-score",
+                              className: "text-[10px] font-mono font-bold text-slate-600 leading-none",
+                              children: [
+                                "Score ",
+                                agent.score
+                              ]
+                            }, undefined, true, undefined, this),
+                            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+                              className: "flex items-center gap-2 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200",
+                              children: [
+                                /* @__PURE__ */ jsx_dev_runtime.jsxDEV(SlidersHorizontal, {
+                                  size: 8,
+                                  className: "text-slate-400"
+                                }, undefined, false, undefined, this),
+                                /* @__PURE__ */ jsx_dev_runtime.jsxDEV("input", {
+                                  type: "number",
+                                  value: mctsSims,
+                                  onChange: (e2) => setMctsSims(Math.max(100, Number.parseInt(e2.target.value, 10) || 0)),
+                                  className: "w-12 bg-transparent text-[9px] font-mono font-bold text-blue-600 outline-none",
+                                  step: "100",
+                                  min: 100
+                                }, undefined, false, undefined, this)
+                              ]
+                            }, undefined, true, undefined, this)
                           ]
                         }, undefined, true, undefined, this) : /* @__PURE__ */ jsx_dev_runtime.jsxDEV("span", {
+                          "data-role": "human-score",
                           className: "text-[11px] font-mono font-bold text-blue-600",
-                          children: agent.score
-                        }, undefined, false, undefined, this)
+                          children: [
+                            "Score ",
+                            agent.score
+                          ]
+                        }, undefined, true, undefined, this)
                       ]
                     }, undefined, true, undefined, this)
                   ]
