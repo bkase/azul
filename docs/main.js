@@ -27576,6 +27576,31 @@ var Binary = createLucideIcon("Binary", [
   ["path", { d: "M14 4h2v6", key: "1idq9u" }]
 ]);
 
+// node_modules/lucide-react/dist/esm/icons/brain.js
+var Brain = createLucideIcon("Brain", [
+  [
+    "path",
+    {
+      d: "M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z",
+      key: "l5xja"
+    }
+  ],
+  [
+    "path",
+    {
+      d: "M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z",
+      key: "ep3f8r"
+    }
+  ],
+  ["path", { d: "M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4", key: "1p4c4q" }],
+  ["path", { d: "M17.599 6.5a3 3 0 0 0 .399-1.375", key: "tmeiqw" }],
+  ["path", { d: "M6.003 5.125A3 3 0 0 0 6.401 6.5", key: "105sqy" }],
+  ["path", { d: "M3.477 10.896a4 4 0 0 1 .585-.396", key: "ql3yin" }],
+  ["path", { d: "M19.938 10.5a4 4 0 0 1 .585.396", key: "1qfode" }],
+  ["path", { d: "M6 18a4 4 0 0 1-1.967-.516", key: "2e4loj" }],
+  ["path", { d: "M19.967 17.484A4 4 0 0 1 18 18", key: "159ez6" }]
+]);
+
 // node_modules/lucide-react/dist/esm/icons/cpu.js
 var Cpu = createLucideIcon("Cpu", [
   ["rect", { width: "16", height: "16", x: "4", y: "4", rx: "2", key: "14l7u7" }],
@@ -27588,6 +27613,20 @@ var Cpu = createLucideIcon("Cpu", [
   ["path", { d: "M20 9h2", key: "19tzq7" }],
   ["path", { d: "M9 2v2", key: "165o2o" }],
   ["path", { d: "M9 20v2", key: "i2bqo8" }]
+]);
+
+// node_modules/lucide-react/dist/esm/icons/equal.js
+var Equal = createLucideIcon("Equal", [
+  ["line", { x1: "5", x2: "19", y1: "9", y2: "9", key: "1nwqeh" }],
+  ["line", { x1: "5", x2: "19", y1: "15", y2: "15", key: "g8yjpy" }]
+]);
+
+// node_modules/lucide-react/dist/esm/icons/frown.js
+var Frown = createLucideIcon("Frown", [
+  ["circle", { cx: "12", cy: "12", r: "10", key: "1mglay" }],
+  ["path", { d: "M16 16s-1.5-2-4-2-4 2-4 2", key: "epbg0q" }],
+  ["line", { x1: "9", x2: "9.01", y1: "9", y2: "9", key: "yxxnd0" }],
+  ["line", { x1: "15", x2: "15.01", y1: "9", y2: "9", key: "1p4y9e" }]
 ]);
 
 // node_modules/lucide-react/dist/esm/icons/rotate-ccw.js
@@ -27614,6 +27653,16 @@ var Target = createLucideIcon("Target", [
   ["circle", { cx: "12", cy: "12", r: "10", key: "1mglay" }],
   ["circle", { cx: "12", cy: "12", r: "6", key: "1vlfrh" }],
   ["circle", { cx: "12", cy: "12", r: "2", key: "1c9p78" }]
+]);
+
+// node_modules/lucide-react/dist/esm/icons/trophy.js
+var Trophy = createLucideIcon("Trophy", [
+  ["path", { d: "M6 9H4.5a2.5 2.5 0 0 1 0-5H6", key: "17hqa7" }],
+  ["path", { d: "M18 9h1.5a2.5 2.5 0 0 0 0-5H18", key: "lmptdp" }],
+  ["path", { d: "M4 22h16", key: "57wxv0" }],
+  ["path", { d: "M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22", key: "1nw9bq" }],
+  ["path", { d: "M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22", key: "1np0yb" }],
+  ["path", { d: "M18 2H6v7a6 6 0 0 0 12 0V2Z", key: "u46fv3" }]
 ]);
 
 // node_modules/lucide-react/dist/esm/icons/user.js
@@ -32869,6 +32918,158 @@ var Node = ({
     ]
   }, undefined, true, undefined, this);
 };
+var AIThinkingModal = ({ visible, sims }) => {
+  if (!visible)
+    return null;
+  return /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+    className: "fixed inset-0 z-50 flex items-center justify-center modal-backdrop bg-black/40 backdrop-blur-sm",
+    children: /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+      className: "modal-content bg-white rounded-2xl shadow-2xl p-8 flex flex-col items-center gap-4 border border-slate-200",
+      children: [
+        /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+          className: "relative",
+          children: [
+            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+              className: "absolute inset-0 rounded-full bg-blue-500/20 pulse-ring"
+            }, undefined, false, undefined, this),
+            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+              className: "relative p-4 bg-gradient-to-br from-blue-500 to-blue-700 rounded-full brain-pulse",
+              children: /* @__PURE__ */ jsx_dev_runtime.jsxDEV(Brain, {
+                size: 32,
+                className: "text-white"
+              }, undefined, false, undefined, this)
+            }, undefined, false, undefined, this)
+          ]
+        }, undefined, true, undefined, this),
+        /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+          className: "flex flex-col items-center gap-1",
+          children: [
+            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+              className: "flex items-center gap-1 text-lg font-black text-slate-800",
+              children: [
+                "AlphaZero Thinking",
+                /* @__PURE__ */ jsx_dev_runtime.jsxDEV("span", {
+                  className: "thinking-dot text-blue-500",
+                  style: { animationDelay: "0ms" },
+                  children: "•"
+                }, undefined, false, undefined, this),
+                /* @__PURE__ */ jsx_dev_runtime.jsxDEV("span", {
+                  className: "thinking-dot text-blue-500",
+                  style: { animationDelay: "120ms" },
+                  children: "•"
+                }, undefined, false, undefined, this),
+                /* @__PURE__ */ jsx_dev_runtime.jsxDEV("span", {
+                  className: "thinking-dot text-blue-500",
+                  style: { animationDelay: "240ms" },
+                  children: "•"
+                }, undefined, false, undefined, this)
+              ]
+            }, undefined, true, undefined, this),
+            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+              className: "text-xs font-mono text-slate-500",
+              children: [
+                "Running ",
+                sims.toLocaleString(),
+                " MCTS simulations"
+              ]
+            }, undefined, true, undefined, this)
+          ]
+        }, undefined, true, undefined, this)
+      ]
+    }, undefined, true, undefined, this)
+  }, undefined, false, undefined, this);
+};
+var GameOverModal = ({ visible, humanScore, aiScore, onNewGame }) => {
+  if (!visible)
+    return null;
+  const humanWon = humanScore > aiScore;
+  const aiWon = aiScore > humanScore;
+  const Icon2 = humanWon ? Trophy : aiWon ? Frown : Equal;
+  const iconBg = humanWon ? "from-amber-400 to-amber-600" : aiWon ? "from-slate-400 to-slate-600" : "from-blue-400 to-blue-600";
+  const ringColor = humanWon ? "bg-amber-500/20" : aiWon ? "bg-slate-500/20" : "bg-blue-500/20";
+  const title = humanWon ? "Victory!" : aiWon ? "Defeat" : "It's a Tie!";
+  const subtitle = humanWon ? "You defeated AlphaZero!" : aiWon ? "AlphaZero wins this time" : "A perfectly matched game";
+  return /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+    className: "fixed inset-0 z-50 flex items-center justify-center modal-backdrop bg-black/40 backdrop-blur-sm",
+    children: /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+      className: "modal-content bg-white rounded-2xl shadow-2xl p-8 flex flex-col items-center gap-5 border border-slate-200 min-w-[320px]",
+      children: [
+        /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+          className: "relative",
+          children: [
+            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+              className: `absolute inset-0 rounded-full ${ringColor} pulse-ring`
+            }, undefined, false, undefined, this),
+            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+              className: `relative p-4 bg-gradient-to-br ${iconBg} rounded-full brain-pulse`,
+              children: /* @__PURE__ */ jsx_dev_runtime.jsxDEV(Icon2, {
+                size: 32,
+                className: "text-white"
+              }, undefined, false, undefined, this)
+            }, undefined, false, undefined, this)
+          ]
+        }, undefined, true, undefined, this),
+        /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+          className: "flex flex-col items-center gap-1",
+          children: [
+            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+              className: "text-2xl font-black text-slate-800",
+              children: title
+            }, undefined, false, undefined, this),
+            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+              className: "text-sm text-slate-500",
+              children: subtitle
+            }, undefined, false, undefined, this)
+          ]
+        }, undefined, true, undefined, this),
+        /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+          className: "flex gap-6 py-3 px-6 bg-slate-50 rounded-xl border border-slate-100",
+          children: [
+            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+              className: "flex flex-col items-center",
+              children: [
+                /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+                  className: "text-[10px] font-black text-slate-400 uppercase tracking-wide",
+                  children: "You"
+                }, undefined, false, undefined, this),
+                /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+                  className: `text-3xl font-black font-mono ${humanWon ? "text-amber-500" : "text-slate-700"}`,
+                  children: humanScore
+                }, undefined, false, undefined, this)
+              ]
+            }, undefined, true, undefined, this),
+            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+              className: "w-px bg-slate-200"
+            }, undefined, false, undefined, this),
+            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+              className: "flex flex-col items-center",
+              children: [
+                /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+                  className: "text-[10px] font-black text-slate-400 uppercase tracking-wide",
+                  children: "AI"
+                }, undefined, false, undefined, this),
+                /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+                  className: `text-3xl font-black font-mono ${aiWon ? "text-blue-500" : "text-slate-700"}`,
+                  children: aiScore
+                }, undefined, false, undefined, this)
+              ]
+            }, undefined, true, undefined, this)
+          ]
+        }, undefined, true, undefined, this),
+        /* @__PURE__ */ jsx_dev_runtime.jsxDEV("button", {
+          onClick: onNewGame,
+          className: "flex items-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition-colors shadow-lg shadow-blue-500/20",
+          children: [
+            /* @__PURE__ */ jsx_dev_runtime.jsxDEV(RotateCcw, {
+              size: 16
+            }, undefined, false, undefined, this),
+            "Play Again"
+          ]
+        }, undefined, true, undefined, this)
+      ]
+    }, undefined, true, undefined, this)
+  }, undefined, false, undefined, this);
+};
 
 class StatsTracker {
   onUpdate;
@@ -33510,6 +33711,10 @@ var App = () => {
     appendLog(`You: ${label}`);
     setSelection({ source: null, color: null });
     setConfirmBufferIdx(null);
+    if (!game.is_game_over() && game.current_player() === aiPlayer) {
+      setAiThinking(true);
+      setStatus("AlphaZero thinking...");
+    }
     refreshView();
   }, [
     appendLog,
@@ -33722,27 +33927,7 @@ var App = () => {
                     /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
                       className: "flex items-center gap-3",
                       children: [
-                        aIdx === aiPlayer && (aiThinking || aiTurn) ? /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
-                          className: "flex items-center gap-1 text-[8px] font-black text-blue-500 uppercase",
-                          children: [
-                            "AI Thinking",
-                            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("span", {
-                              className: "thinking-dot",
-                              style: { animationDelay: "0ms" },
-                              children: "•"
-                            }, undefined, false, undefined, this),
-                            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("span", {
-                              className: "thinking-dot",
-                              style: { animationDelay: "120ms" },
-                              children: "•"
-                            }, undefined, false, undefined, this),
-                            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("span", {
-                              className: "thinking-dot",
-                              style: { animationDelay: "240ms" },
-                              children: "•"
-                            }, undefined, false, undefined, this)
-                          ]
-                        }, undefined, true, undefined, this) : stateView?.current_player === aIdx ? /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+                        stateView?.current_player === aIdx && aIdx === humanPlayer && !aiThinking ? /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
                           className: "text-[8px] font-black text-blue-500 uppercase",
                           children: "Your turn"
                         }, undefined, false, undefined, this) : null,
@@ -34152,7 +34337,17 @@ var App = () => {
             children: modelReady ? "Model loaded" : "Loading..."
           }, undefined, false, undefined, this)
         ]
-      }, undefined, true, undefined, this)
+      }, undefined, true, undefined, this),
+      /* @__PURE__ */ jsx_dev_runtime.jsxDEV(AIThinkingModal, {
+        visible: aiThinking,
+        sims: mctsSims
+      }, undefined, false, undefined, this),
+      /* @__PURE__ */ jsx_dev_runtime.jsxDEV(GameOverModal, {
+        visible: gameOver && !aiThinking,
+        humanScore: agents[humanPlayer]?.score ?? 0,
+        aiScore: agents[aiPlayer]?.score ?? 0,
+        onNewGame: initialize
+      }, undefined, false, undefined, this)
     ]
   }, undefined, true, undefined, this);
 };

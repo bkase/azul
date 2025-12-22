@@ -9,6 +9,10 @@ import {
   Target,
   Activity,
   SlidersHorizontal,
+  Brain,
+  Trophy,
+  Frown,
+  Equal,
 } from "lucide-react";
 import init, {
   action_space_size,
@@ -248,6 +252,110 @@ const Node = ({
     >
       {type === "origin" && "1"}
       <div className="absolute inset-0 bg-white/10 pointer-events-none rounded-inherit" />
+    </div>
+  );
+};
+
+type AIThinkingModalProps = {
+  visible: boolean;
+  sims: number;
+};
+
+const AIThinkingModal = ({ visible, sims }: AIThinkingModalProps) => {
+  if (!visible) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center modal-backdrop bg-black/40 backdrop-blur-sm">
+      <div className="modal-content bg-white rounded-2xl shadow-2xl p-8 flex flex-col items-center gap-4 border border-slate-200">
+        <div className="relative">
+          <div className="absolute inset-0 rounded-full bg-blue-500/20 pulse-ring" />
+          <div className="relative p-4 bg-gradient-to-br from-blue-500 to-blue-700 rounded-full brain-pulse">
+            <Brain size={32} className="text-white" />
+          </div>
+        </div>
+        <div className="flex flex-col items-center gap-1">
+          <div className="flex items-center gap-1 text-lg font-black text-slate-800">
+            AlphaZero Thinking
+            <span className="thinking-dot text-blue-500" style={{ animationDelay: "0ms" }}>•</span>
+            <span className="thinking-dot text-blue-500" style={{ animationDelay: "120ms" }}>•</span>
+            <span className="thinking-dot text-blue-500" style={{ animationDelay: "240ms" }}>•</span>
+          </div>
+          <div className="text-xs font-mono text-slate-500">
+            Running {sims.toLocaleString()} MCTS simulations
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+type GameOverModalProps = {
+  visible: boolean;
+  humanScore: number;
+  aiScore: number;
+  onNewGame: () => void;
+};
+
+const GameOverModal = ({ visible, humanScore, aiScore, onNewGame }: GameOverModalProps) => {
+  if (!visible) return null;
+
+  const humanWon = humanScore > aiScore;
+  const aiWon = aiScore > humanScore;
+
+  const Icon = humanWon ? Trophy : aiWon ? Frown : Equal;
+  const iconBg = humanWon
+    ? "from-amber-400 to-amber-600"
+    : aiWon
+      ? "from-slate-400 to-slate-600"
+      : "from-blue-400 to-blue-600";
+  const ringColor = humanWon ? "bg-amber-500/20" : aiWon ? "bg-slate-500/20" : "bg-blue-500/20";
+
+  const title = humanWon ? "Victory!" : aiWon ? "Defeat" : "It's a Tie!";
+  const subtitle = humanWon
+    ? "You defeated AlphaZero!"
+    : aiWon
+      ? "AlphaZero wins this time"
+      : "A perfectly matched game";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center modal-backdrop bg-black/40 backdrop-blur-sm">
+      <div className="modal-content bg-white rounded-2xl shadow-2xl p-8 flex flex-col items-center gap-5 border border-slate-200 min-w-[320px]">
+        <div className="relative">
+          <div className={`absolute inset-0 rounded-full ${ringColor} pulse-ring`} />
+          <div className={`relative p-4 bg-gradient-to-br ${iconBg} rounded-full brain-pulse`}>
+            <Icon size={32} className="text-white" />
+          </div>
+        </div>
+
+        <div className="flex flex-col items-center gap-1">
+          <div className="text-2xl font-black text-slate-800">{title}</div>
+          <div className="text-sm text-slate-500">{subtitle}</div>
+        </div>
+
+        <div className="flex gap-6 py-3 px-6 bg-slate-50 rounded-xl border border-slate-100">
+          <div className="flex flex-col items-center">
+            <div className="text-[10px] font-black text-slate-400 uppercase tracking-wide">You</div>
+            <div className={`text-3xl font-black font-mono ${humanWon ? "text-amber-500" : "text-slate-700"}`}>
+              {humanScore}
+            </div>
+          </div>
+          <div className="w-px bg-slate-200" />
+          <div className="flex flex-col items-center">
+            <div className="text-[10px] font-black text-slate-400 uppercase tracking-wide">AI</div>
+            <div className={`text-3xl font-black font-mono ${aiWon ? "text-blue-500" : "text-slate-700"}`}>
+              {aiScore}
+            </div>
+          </div>
+        </div>
+
+        <button
+          onClick={onNewGame}
+          className="flex items-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition-colors shadow-lg shadow-blue-500/20"
+        >
+          <RotateCcw size={16} />
+          Play Again
+        </button>
+      </div>
     </div>
   );
 };
@@ -1002,6 +1110,14 @@ const App = () => {
       appendLog(`You: ${label}`);
       setSelection({ source: null, color: null });
       setConfirmBufferIdx(null);
+
+      // Immediately show AI thinking modal if it's now AI's turn
+      // Note: Only set the state, not the ref - the ref is a guard used by runAiTurn
+      if (!game.is_game_over() && game.current_player() === aiPlayer) {
+        setAiThinking(true);
+        setStatus("AlphaZero thinking...");
+      }
+
       refreshView();
     },
     [
@@ -1218,20 +1334,7 @@ const App = () => {
                   </span>
                 </div>
                 <div className="flex items-center gap-3">
-                  {aIdx === aiPlayer && (aiThinking || aiTurn) ? (
-                    <div className="flex items-center gap-1 text-[8px] font-black text-blue-500 uppercase">
-                      AI Thinking
-                      <span className="thinking-dot" style={{ animationDelay: "0ms" }}>
-                        •
-                      </span>
-                      <span className="thinking-dot" style={{ animationDelay: "120ms" }}>
-                        •
-                      </span>
-                      <span className="thinking-dot" style={{ animationDelay: "240ms" }}>
-                        •
-                      </span>
-                    </div>
-                  ) : stateView?.current_player === aIdx ? (
+                  {stateView?.current_player === aIdx && aIdx === humanPlayer && !aiThinking ? (
                     <div className="text-[8px] font-black text-blue-500 uppercase">
                       Your turn
                     </div>
@@ -1582,6 +1685,14 @@ const App = () => {
           {modelReady ? "Model loaded" : "Loading..."}
         </span>
       </footer>
+
+      <AIThinkingModal visible={aiThinking} sims={mctsSims} />
+      <GameOverModal
+        visible={gameOver && !aiThinking}
+        humanScore={agents[humanPlayer]?.score ?? 0}
+        aiScore={agents[aiPlayer]?.score ?? 0}
+        onNewGame={initialize}
+      />
     </div>
   );
 };

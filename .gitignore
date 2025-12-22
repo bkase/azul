@@ -19,3 +19,5 @@ teacher*.safetensors
 
 # Web tooling
 /web/node_modules/
+/web/main.js
+/web/pkg/
