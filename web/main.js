@@ -32757,15 +32757,16 @@ var PALETTE = {
 };
 var SOURCE_COUNT = 5;
 var LATTICE_MAP = [
-  ["blue", "amber", "emerald", "rose", "zinc"],
-  ["zinc", "blue", "amber", "emerald", "rose"],
-  ["rose", "zinc", "blue", "amber", "emerald"],
-  ["emerald", "rose", "zinc", "blue", "amber"],
-  ["amber", "emerald", "rose", "zinc", "blue"]
+  ["blue", "amber", "rose", "zinc", "emerald"],
+  ["emerald", "blue", "amber", "rose", "zinc"],
+  ["zinc", "emerald", "blue", "amber", "rose"],
+  ["rose", "zinc", "emerald", "blue", "amber"],
+  ["amber", "rose", "zinc", "emerald", "blue"]
 ];
 var LOSS_FACTORS = [-1, -1, -2, -2, -2, -3, -3];
 var MAX_ROUNDS = 5;
 var DEFAULT_CHECKPOINT_URL = "../checkpoints6/best.safetensors";
+var MIN_THINKING_MS = 350;
 var byNumber = (value, digits = 2) => value == null || Number.isNaN(value) ? "--" : value.toFixed(digits);
 var formatMs = (value) => value <= 0 || Number.isNaN(value) ? "--" : `${value.toFixed(1)} ms`;
 var HISTORY_LEN = 50;
@@ -33315,7 +33316,13 @@ var App = () => {
     if (!game)
       return;
     try {
-      const view = game.state_view();
+      const viewRaw = game.state_view();
+      const view = {
+        ...viewRaw,
+        current_player: Number(viewRaw.current_player),
+        round: Number(viewRaw.round),
+        num_players: Number(viewRaw.num_players)
+      };
       const actions = game.legal_action_details();
       setStateView(view);
       setLegalActions(actions);
@@ -33395,10 +33402,11 @@ var App = () => {
       return;
     aiThinkingRef.current = true;
     setAiThinking(true);
+    setStatus("AlphaZero thinking...");
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    const thinkingStart = performance.now();
     try {
       while (!game.is_game_over() && game.current_player() === aiPlayer) {
-        setStatus("AlphaZero thinking...");
-        await new Promise((resolve) => requestAnimationFrame(resolve));
         const sims = mctsSimsRef.current;
         const rootState = game.clone_handle();
         const actionId = await selectAction(rootState, sims, model, stats);
@@ -33410,9 +33418,13 @@ var App = () => {
         refreshView();
       }
     } finally {
+      const elapsed = performance.now() - thinkingStart;
+      if (elapsed < MIN_THINKING_MS) {
+        await new Promise((resolve) => setTimeout(resolve, MIN_THINKING_MS - elapsed));
+      }
       aiThinkingRef.current = false;
       setAiThinking(false);
-      setStatus("Your move");
+      setStatus(game.is_game_over() ? "Game over" : "Your move");
     }
   }, [appendLog, refreshView]);
   import_react3.useEffect(() => {
@@ -33509,8 +33521,9 @@ var App = () => {
     selection,
     stateView
   ]);
-  const isHumanTurn = stateView?.current_player === humanPlayer && !aiThinking;
   const gameOver = gameRef.current?.is_game_over() ?? false;
+  const aiTurn = stateView?.current_player === aiPlayer && !gameOver;
+  const isHumanTurn = stateView?.current_player === humanPlayer && !aiThinking;
   const agents = import_react3.useMemo(() => {
     if (!stateView)
       return [];
@@ -33529,7 +33542,7 @@ var App = () => {
       };
     });
   }, [stateView]);
-  const statusDetail = error ? `Error: ${error}` : gameOver ? "Game over" : status;
+  const statusDetail = error ? `Error: ${error}` : gameOver ? "Game over" : aiThinking || aiTurn ? "AI thinking..." : status;
   return /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
     className: "h-screen text-slate-900 font-display flex flex-col overflow-hidden",
     style: {
@@ -33709,10 +33722,30 @@ var App = () => {
                     /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
                       className: "flex items-center gap-3",
                       children: [
-                        stateView?.current_player === aIdx && /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
-                          className: "text-[8px] font-black text-blue-500 animate-pulse uppercase",
-                          children: "Thinking"
-                        }, undefined, false, undefined, this),
+                        aIdx === aiPlayer && (aiThinking || aiTurn) ? /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+                          className: "flex items-center gap-1 text-[8px] font-black text-blue-500 uppercase",
+                          children: [
+                            "AI Thinking",
+                            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("span", {
+                              className: "thinking-dot",
+                              style: { animationDelay: "0ms" },
+                              children: "•"
+                            }, undefined, false, undefined, this),
+                            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("span", {
+                              className: "thinking-dot",
+                              style: { animationDelay: "120ms" },
+                              children: "•"
+                            }, undefined, false, undefined, this),
+                            /* @__PURE__ */ jsx_dev_runtime.jsxDEV("span", {
+                              className: "thinking-dot",
+                              style: { animationDelay: "240ms" },
+                              children: "•"
+                            }, undefined, false, undefined, this)
+                          ]
+                        }, undefined, true, undefined, this) : stateView?.current_player === aIdx ? /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
+                          className: "text-[8px] font-black text-blue-500 uppercase",
+                          children: "Your turn"
+                        }, undefined, false, undefined, this) : null,
                         aIdx === aiPlayer ? /* @__PURE__ */ jsx_dev_runtime.jsxDEV("div", {
                           className: "flex flex-col items-end gap-1 sm:flex-row sm:items-center sm:gap-2",
                           children: [

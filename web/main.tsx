@@ -34,16 +34,17 @@ const PALETTE = {
 const ELEMENT_TYPES = ["blue", "amber", "emerald", "rose", "zinc"] as const;
 const SOURCE_COUNT = 5;
 const LATTICE_MAP = [
-  ["blue", "amber", "emerald", "rose", "zinc"],
-  ["zinc", "blue", "amber", "emerald", "rose"],
-  ["rose", "zinc", "blue", "amber", "emerald"],
-  ["emerald", "rose", "zinc", "blue", "amber"],
-  ["amber", "emerald", "rose", "zinc", "blue"],
+  ["blue", "amber", "rose", "zinc", "emerald"],
+  ["emerald", "blue", "amber", "rose", "zinc"],
+  ["zinc", "emerald", "blue", "amber", "rose"],
+  ["rose", "zinc", "emerald", "blue", "amber"],
+  ["amber", "rose", "zinc", "emerald", "blue"],
 ] as const;
 
 const LOSS_FACTORS = [-1, -1, -2, -2, -2, -3, -3] as const;
 const MAX_ROUNDS = 5;
 const DEFAULT_CHECKPOINT_URL = "../checkpoints6/best.safetensors";
+const MIN_THINKING_MS = 350;
 
 const byNumber = (value: number | null | undefined, digits = 2) =>
   value == null || Number.isNaN(value) ? "--" : value.toFixed(digits);
@@ -789,7 +790,13 @@ const App = () => {
     const game = gameRef.current;
     if (!game) return;
     try {
-      const view = game.state_view() as unknown as GameStateView;
+      const viewRaw = game.state_view() as unknown as GameStateView;
+      const view: GameStateView = {
+        ...viewRaw,
+        current_player: Number(viewRaw.current_player),
+        round: Number(viewRaw.round),
+        num_players: Number(viewRaw.num_players),
+      };
       const actions = game.legal_action_details() as unknown as ActionDetail[];
       setStateView(view);
       setLegalActions(actions);
@@ -877,11 +884,12 @@ const App = () => {
 
     aiThinkingRef.current = true;
     setAiThinking(true);
+    setStatus("AlphaZero thinking...");
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    const thinkingStart = performance.now();
 
     try {
       while (!game.is_game_over() && game.current_player() === aiPlayer) {
-        setStatus("AlphaZero thinking...");
-        await new Promise((resolve) => requestAnimationFrame(resolve));
         const sims = mctsSimsRef.current;
         const rootState = game.clone_handle();
         const actionId = await selectAction(rootState, sims, model, stats);
@@ -893,9 +901,13 @@ const App = () => {
         refreshView();
       }
     } finally {
+      const elapsed = performance.now() - thinkingStart;
+      if (elapsed < MIN_THINKING_MS) {
+        await new Promise((resolve) => setTimeout(resolve, MIN_THINKING_MS - elapsed));
+      }
       aiThinkingRef.current = false;
       setAiThinking(false);
-      setStatus("Your move");
+      setStatus(game.is_game_over() ? "Game over" : "Your move");
     }
   }, [appendLog, refreshView]);
 
@@ -1004,8 +1016,9 @@ const App = () => {
     ],
   );
 
-  const isHumanTurn = stateView?.current_player === humanPlayer && !aiThinking;
   const gameOver = gameRef.current?.is_game_over() ?? false;
+  const aiTurn = stateView?.current_player === aiPlayer && !gameOver;
+  const isHumanTurn = stateView?.current_player === humanPlayer && !aiThinking;
 
   const agents = useMemo(() => {
     if (!stateView) return [];
@@ -1031,7 +1044,9 @@ const App = () => {
     ? `Error: ${error}`
     : gameOver
       ? "Game over"
-      : status;
+      : aiThinking || aiTurn
+        ? "AI thinking..."
+        : status;
 
   return (
     <div
@@ -1203,11 +1218,24 @@ const App = () => {
                   </span>
                 </div>
                 <div className="flex items-center gap-3">
-                  {stateView?.current_player === aIdx && (
-                    <div className="text-[8px] font-black text-blue-500 animate-pulse uppercase">
-                      Thinking
+                  {aIdx === aiPlayer && (aiThinking || aiTurn) ? (
+                    <div className="flex items-center gap-1 text-[8px] font-black text-blue-500 uppercase">
+                      AI Thinking
+                      <span className="thinking-dot" style={{ animationDelay: "0ms" }}>
+                        •
+                      </span>
+                      <span className="thinking-dot" style={{ animationDelay: "120ms" }}>
+                        •
+                      </span>
+                      <span className="thinking-dot" style={{ animationDelay: "240ms" }}>
+                        •
+                      </span>
                     </div>
-                  )}
+                  ) : stateView?.current_player === aIdx ? (
+                    <div className="text-[8px] font-black text-blue-500 uppercase">
+                      Your turn
+                    </div>
+                  ) : null}
                   {aIdx === aiPlayer ? (
                     <div className="flex flex-col items-end gap-1 sm:flex-row sm:items-center sm:gap-2">
                       <span
