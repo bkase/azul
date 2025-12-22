@@ -32814,7 +32814,7 @@ var LATTICE_MAP = [
 ];
 var LOSS_FACTORS = [-1, -1, -2, -2, -2, -3, -3];
 var MAX_ROUNDS = 5;
-var DEFAULT_CHECKPOINT_URL = "../checkpoints6/best.safetensors";
+var DEFAULT_CHECKPOINT_URL = new URL("./best.safetensors", import.meta.url).toString();
 var MIN_THINKING_MS = 350;
 var byNumber = (value, digits = 2) => value == null || Number.isNaN(value) ? "--" : value.toFixed(digits);
 var formatMs = (value) => value <= 0 || Number.isNaN(value) ? "--" : `${value.toFixed(1)} ms`;

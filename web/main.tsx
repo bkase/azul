@@ -47,7 +47,10 @@ const LATTICE_MAP = [
 
 const LOSS_FACTORS = [-1, -1, -2, -2, -2, -3, -3] as const;
 const MAX_ROUNDS = 5;
-const DEFAULT_CHECKPOINT_URL = "../checkpoints6/best.safetensors";
+const DEFAULT_CHECKPOINT_URL = new URL(
+  "./best.safetensors",
+  import.meta.url,
+).toString();
 const MIN_THINKING_MS = 350;
 
 const byNumber = (value: number | null | undefined, digits = 2) =>
