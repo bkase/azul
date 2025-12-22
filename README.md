@@ -183,6 +183,12 @@ cargo run --release --bin inspect -- \
 - Enable lightweight counters/timers with `--features profiling` (or just use `cargo train`).
 - See `docs/PROFILING.md` for workflows (counters, criterion benches, flamegraphs).
 
+## Web UI (GitHub Pages)
+
+- Source lives in `web/`, published assets live in `docs/` for GitHub Pages.
+- Build + publish locally: `scripts/publish-web.sh` (copies latest `best.safetensors` into `docs/`).
+- In GitHub: Settings → Pages → Deploy from a branch → `main` / `docs`.
+
 ## Architecture
 
 ### Game Engine (`azul-engine`)
